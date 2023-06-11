@@ -43,6 +43,12 @@ static struct coro *coro_this_ptr = NULL;
 /** List of all the coroutines. */
 static struct coro *coro_list = NULL;
 /**
+ * If a coroutine exits, the pointer to the next one is stored here
+ * to designate that it is the next coroutine to switch to from
+ * `coro_sched_wait`. Otherwise set to `NULL`.
+ */
+static struct coro *coro_saved_next = NULL;
+/**
  * Buffer, used by the coroutine constructor to escape from the
  * signal handler back into the constructor to rollback
  * sigaltstack etc.
@@ -137,8 +143,17 @@ coro_sched_wait(void)
 				return c;
 			}
 		}
+
+		struct coro *to;
+		if (coro_saved_next) {
+			to = coro_saved_next;
+			coro_saved_next = NULL;
+		} else {
+			to = coro_list;
+		}
+
 		is_sched_waiting = true;
-		coro_yield_to(coro_list);
+		coro_yield_to(to);
 		is_sched_waiting = false;
 	}
 	return NULL;
@@ -175,6 +190,10 @@ coro_body(int signum)
 	coro_this_ptr = c;
 	c->ret = c->func(c->func_arg);
 	c->is_finished = true;
+
+	// Fair round-robin: save the next coroutine to continue with.
+	coro_saved_next = c->next;
+
 	/* Can not return - 'ret' address is invalid already! */
 	if (! is_sched_waiting) {
 		printf("Critical error - no place to return!\n");
@@ -245,7 +264,7 @@ coro_new(coro_f func, void *func_arg)
 	if (sigaltstack(&newst, NULL) != 0)
 		handle_error();
 	if ((oldst.ss_flags & SS_DISABLE) == 0 &&
-	    sigaltstack(&oldst, NULL) != 0)
+		sigaltstack(&oldst, NULL) != 0)
 		handle_error();
 	if (sigaction(SIGUSR2, &oldsa, NULL) != 0)
 		handle_error();

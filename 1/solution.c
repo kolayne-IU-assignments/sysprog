@@ -107,7 +107,7 @@ struct timespec merge(int *out, int *from1, int len1, int *from2, int len2,
             mn = *j++;
 
         *out++ = mn;
-        
+
         // If it's time to, yield, adding the wait time to `wait_time` and updating `next_switch`
         if (timespec_less(next_switch, /*now*/must_clock_monotonic())) {
             wait_time = timespec_add(wait_time, coro_yield_timered());
@@ -135,14 +135,21 @@ struct timespec merge(int *out, int *from1, int len1, int *from2, int len2,
     return wait_time;
 }
 
-struct cor_inp {
+
+struct sort_file_inp {
+    int worker_id;
+    // `filename` set to `NULL` represents that the worker is waiting for a file;
+    // `filename` set to `(char *)-1` represents a worker in an invalid state (uninitialized / terminated);
+    // other values of `filename` should be treated naturally.
     char *filename;
     struct timespec latency;
-};
 
-struct cor_res {
     int *array;
     int arr_size;
+};
+
+struct sort_file_res {
+    int worker_id;
     int switch_count;
     struct timespec time_spent;
 };
@@ -152,110 +159,223 @@ sort_file(void *data)
 {
     struct timespec start = must_clock_monotonic();
 
-    struct cor_inp *input = (struct cor_inp *)data;
-    
-    FILE *f = fopen(input->filename, "r");
-    if (f == NULL) {
-        perror("fopen of input file");
-        return -1;
-    }
+    struct sort_file_inp *dnp = (struct sort_file_inp *)data;
 
-    int *array = NULL;
-    int arr_size = 0;
-    int arr_idx = 0;
+    (void)fprintf(stderr, "Worker %d has entered sort_file()\n", dnp->worker_id);
 
-    int val;
-    while(1 == fscanf(f, "%d", &val)) {
-        if (arr_idx >= arr_size) {
-            arr_size = 1 + arr_size * 2;
-            array = reallocarray(array, sizeof (int), arr_size);
-            if (array == NULL) {
-                perror("reallocarray");
-                return -1;
-            }
+    dnp->filename = NULL;  // Initialized.
+
+    while (1) {
+        coro_yield();
+
+        if (dnp->filename == NULL) {
+            // Still not assigned, which means there are no files left. Nothing to be done
+            (void)fprintf(stderr, "Worker %d didn't receive a file. Terminating\n", dnp->worker_id);
+            dnp->filename = (char *)-1;  // Termination indication
+            break;
+        } else {
+            (void)fprintf(stderr, "Worker %d got file %s. Starting the work\n", dnp->worker_id, dnp->filename);
         }
-        array[arr_idx++] = val;
-    }
 
-    // Truncate the unread numbers. There is no memory safety problem: libc still remembers
-    // the actual amount of memory to free.
-    arr_size = arr_idx;
+        FILE *f = fopen(dnp->filename, "r");
+        if (f == NULL) {
+            perror("fopen of input file");
+            return -1;
+        }
 
-    (void)fprintf(stderr, "read %d numbers from %s\n", arr_size, input->filename);
+        // The previous values of array and arr_size were taken by distributor
+        int *unsorted = NULL;
+        int arr_size = 0;
+        int arr_idx = 0;
 
-    int *sorted = malloc(sizeof (int) * arr_size);
-    if (sorted == NULL) {
-        perror("malloc for sorted array");
-        return -1;
-    }
-    struct timespec wait_time = merge(sorted, array, arr_size, NULL, 0, true, input->latency);
-    
-    free(array);
+        int val;
+        while(1 == fscanf(f, "%d", &val)) {
+            if (arr_idx >= arr_size) {
+                arr_size = 1 + arr_size * 2;
+                unsorted = reallocarray(unsorted, sizeof (int), arr_size);
+                if (unsorted == NULL) {
+                    perror("reallocarray");
+                    return -1;
+                }
+            }
+            unsorted[arr_idx++] = val;
+        }
 
-    struct cor_res *res = malloc(sizeof (struct cor_res));
-    if (res == NULL) {
-        perror("malloc for struct cor_res");
-        return -1;
+        (void)fprintf(stderr, "Worker %d has read %d numbers\n", dnp->worker_id, arr_idx);
+
+        dnp->array = malloc(sizeof (int) * arr_idx);
+        if (dnp->array == NULL) {
+            perror("malloc for new dnp->sorted array");
+            return -1;
+        }
+
+        // Truncate the unread numbers. There is no memory safety problem: libc still remembers
+        // the actual amount of memory to free.
+        dnp->arr_size = arr_idx;
+
+        struct timespec wait_time = merge(dnp->array, unsorted, arr_idx, NULL, 0, true, dnp->latency);
+
+        free(unsorted);
+
+        // Shift start time as if there was no waiting
+        start = timespec_add(start, wait_time);
+
+        (void)fprintf(stderr, "Worker %d has finished processing %s\n", dnp->worker_id, dnp->filename);
+        dnp->filename = NULL;  // Signal that I want the next file
     }
 
     struct timespec stop = must_clock_monotonic();
 
-    res->array = sorted;
-    res->arr_size = arr_size;
+    struct sort_file_res *res = malloc(sizeof (struct sort_file_res));
+    if (res == NULL) {
+        perror("malloc for struct sort_file_res");
+        return -1;
+    }
+
+    res->worker_id = dnp->worker_id;
     res->switch_count = coro_switch_count(coro_this());
-    res->time_spent = timespec_diff(timespec_diff(stop, start), wait_time);
+    res->time_spent = timespec_diff(stop, start);
     return (long long)res;
 }
+
+
+struct distributor_inp {
+    struct sort_file_inp *dnps;
+    int workers_count;
+
+    char **filenames;
+    size_t files_count;
+
+    // At least `files_count` elements must be allocated for `resulting_arrays*`
+    int **resulting_arrays;
+    int *resulting_arrays_sizes;
+};
+
+long long distributor(void *data) {
+    /*
+     * The idea is as follows. My (patched) version of libcoro guarantees that the coroutines are
+     * executed in the same order, wrapping (i.e. round robin manner where coroutines never only
+     * join or quit, never swap). If a coroutine returns, the control is first handed to the
+     * scheduler, then passed onto the former-next of the returned coroutine.
+     *
+     * When a worker coroutine is done processing a file, it signals so by setting its
+     * `input->filename` to `NULL` and gives control to the next coroutine. When the yields wrap,
+     * the execution reaches the distributor coroutine (this one), which sets the `filename`s for
+     * all workers which are ready. The arrays produced by the worker coroutines are collected by
+     * `distributor` to its input's `->resulting_arrays`.
+     *
+     * When the distributor is out of files, it continues to collect the sorted arrays, counting
+     * each worker getting free. As they are not given new files, the free workers will terminate,
+     * **setting `->filename` to `-1`** (that is to make it simpler to distinguish between the
+     * coroutines which just requested a new file from the ones that already terminated without
+     * getting one previously).
+     * The distributor counts the number of terminated workers and, when they are all finished,
+     * returns `0LL`.
+     */
+
+    struct distributor_inp *input = (struct distributor_inp *)data;
+
+    int alive_workers_count = input->workers_count;
+
+    size_t next_file = 0;
+    size_t next_res = 0;
+
+    while (alive_workers_count) {
+        for (int i = 0; i < input->workers_count; ++i) {
+            // 0. Find a worker that is in a valid state and wants a file
+            if (input->dnps[i].filename == NULL) {
+                // 1. If there is a new result (i.e. not the very first round of worker), store it
+                if (input->dnps[i].array != NULL) {
+                    input->resulting_arrays[next_res] = input->dnps[i].array;
+                    input->resulting_arrays_sizes[next_res] = input->dnps[i].arr_size;
+                    ++next_res;
+                }
+
+                // 2. If there is a file to process, give it to the worker, otherwise
+                // consider it terminated.
+                if (next_file < input->files_count) {
+                    input->dnps[i].filename = input->filenames[next_file++];
+                } else {
+                    alive_workers_count--;
+                }
+            }
+        }
+
+        coro_yield();
+    }
+
+    return 0;
+}
+
 
 void output_arr(const int *arr, int size);
 
 int
 main(int argc, char **argv)
 {
-    _Static_assert (sizeof (long long) == sizeof (void *), "`long long` is expected pointer size: "
+    _Static_assert (sizeof (long long) == sizeof (void *), "`long long` is expected to be pointer-sized: "
             "coroutine functions can't return pointers");
 
-    if (argc <= 2) {
+    if (argc <= 3) {
         fputs("Too few command-line arguments\n", stderr);
         return 1;
     }
 
+    int files_count = argc - 3;
+
     char *parse_check;
+    long workers_count = strtol(argv[2], &parse_check, 10);
+    if (*parse_check) {
+        fputs("Error: the second command-line argument must be an integer workers count", stderr);
+        return 3;
+    }
+
     double target_latency_sec = strtod(argv[1], &parse_check);
     if (*parse_check) {
-        puts("Error: the first command-line argument must be a floating-point target latency value");
+        fputs("Error: the first command-line argument must be a floating-point target latency value", stderr);
         return 2;
     }
-    double latency_sec = target_latency_sec / (argc - 2);
+    double latency_sec = target_latency_sec / workers_count;
+    printf("Each worker will be given the %f latency\n", latency_sec);
 
     struct timespec latency = timespec_from_double(latency_sec);
 
     /* Initialize our coroutine global cooperative scheduler. */
     coro_sched_init();
 
-    struct cor_inp inputs[argc - 2];
-    for (int i = 2; i < argc; ++i) {
-        inputs[i - 2].filename = argv[i];
-        inputs[i - 2].latency = latency;
-        coro_new(sort_file, (void *)&inputs[i - 2]);
+    struct sort_file_inp inputs[workers_count];
+    for (int i = 0; i < workers_count; ++i) {
+        inputs[i].filename = (char *)-1;  // Worker is in invalid state: not yet initialized
+        inputs[i].worker_id = i;  // Only used for logging
+        inputs[i].latency = latency;
+        inputs[i].array = NULL;
+        inputs[i].arr_size = 0;
+        coro_new(sort_file, (void *)&inputs[i]);
     }
 
-    struct cor_res results[argc - 2];
-    int res_idx = 0;
+    int *resulting_arrays[files_count];
+    int resulting_arrays_sizes[files_count];
+
+    struct distributor_inp distr_inp = { .dnps = inputs, .workers_count = workers_count,
+        .filenames = argv + 3, .files_count = files_count, .resulting_arrays = resulting_arrays,
+        .resulting_arrays_sizes = resulting_arrays_sizes};
+
+    coro_new(distributor, (void *)&distr_inp);
 
     /* Wait for all the coroutines to end. */
     struct coro *c;
     while ((c = coro_sched_wait()) != NULL) {
-        struct cor_res *res = (struct cor_res *)coro_status(c);
-        if ((long long)res == -1) {
+        long long status = coro_status(c);
+        if (status == -1) {
             (void)printf("Error: a coroutine terminated with an error\n");
+        } else if (status == 0) {
+            (void)printf("Distributor has terminated\n");
         } else {
-            (void)printf("Coroutine finished. Sorted %d numbers in %lld.%.9ld seconds with %d switches\n",
-                    res->arr_size, (long long)res->time_spent.tv_sec, res->time_spent.tv_nsec,
+            struct sort_file_res *res = (struct sort_file_res *)status;
+            (void)printf("Coroutine %d finished in %lld.%.9ld seconds with %d switches\n",
+                    res->worker_id, (long long)res->time_spent.tv_sec, res->time_spent.tv_nsec,
                     res->switch_count);
-            results[res_idx] = *res;
             free(res);
-            res_idx++;
         }
         coro_delete(c);
     }
@@ -265,8 +385,8 @@ main(int argc, char **argv)
     // Then they are swapped.
 
     long long total = 0;
-    for (int i = 0; i < res_idx; ++i) {
-        total += results[i].arr_size;
+    for (int i = 0; i < files_count; ++i) {
+        total += resulting_arrays_sizes[i];
     }
 
     int sorted1_[total];
@@ -275,10 +395,10 @@ main(int argc, char **argv)
     int *sorted1 = sorted1_, *sorted2 = sorted2_;
     int len1 = 0, len2 = 0;
 
-    for (int i = 0; i < res_idx; ++i) {
-        (void)merge(sorted1, sorted2, len2, results[i].array, results[i].arr_size, false, latency);
-        len1 = results[i].arr_size + len2;
-        free(results[i].array);  // Won't use this array again
+    for (int i = 0; i < files_count; ++i) {
+        (void)merge(sorted1, sorted2, len2, resulting_arrays[i], resulting_arrays_sizes[i], false, latency);
+        len1 = resulting_arrays_sizes[i] + len2;
+        free(resulting_arrays[i]);  // Won't use this again
         SWAP(int *, sorted1, sorted2);
         SWAP(int, len1, len2);
     }
