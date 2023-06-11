@@ -3,7 +3,7 @@
 #include <stdbool.h>
 
 struct coro;
-typedef int (*coro_f)(void *);
+typedef long long (*coro_f)(void *);
 
 /** Make current context scheduler. */
 void
@@ -28,7 +28,7 @@ struct coro *
 coro_new(coro_f func, void *func_arg);
 
 /** Return status of the coroutine. */
-int
+long long
 coro_status(const struct coro *c);
 
 long long

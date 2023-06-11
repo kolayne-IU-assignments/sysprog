@@ -12,7 +12,7 @@
 /** Main coroutine structure, its context. */
 struct coro {
 	/** A value, returned by func. */
-	int ret;
+	long long ret;
 	/** Stack, used by the coroutine. */
 	void *stack;
 	/** An argument for the function func. */
@@ -73,7 +73,7 @@ coro_list_delete(struct coro *c)
 		coro_list = next;
 }
 
-int
+long long
 coro_status(const struct coro *c)
 {
 	return c->ret;
