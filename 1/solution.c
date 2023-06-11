@@ -6,8 +6,28 @@
 
 #define SWAP(type, a, b) { type swap_tmp = (a); (a) = (b); (b) = swap_tmp; }
 
-inline static struct timespec timespec_sum(const struct timespec a, const struct timespec b) {
-    struct timespec sum = { .tv_sec = a.tv_sec + b.tv_sec, .tv_nsec = a.tv_nsec + b.tv_nsec };
+inline static struct timespec must_clock_monotonic() {
+    struct timespec res;
+    if (0 != clock_gettime(CLOCK_MONOTONIC, &res)) {
+        perror("clock_gettime(CLOCK_MONOTONIC)");
+        exit(1);  // If failed, terminate
+    }
+    return res;
+}
+
+inline static struct timespec timespec_from_double (double sec) {
+    long long tv_sec = sec;
+    struct timespec res = { .tv_sec = tv_sec, .tv_nsec = (sec - tv_sec) * 1e9 };
+    return res;
+}
+
+inline static struct timespec timespec_add(const struct timespec a, const struct timespec b) {
+    unsigned long long nsec = a.tv_nsec + b.tv_nsec;
+    struct timespec sum = { .tv_sec = a.tv_sec + b.tv_sec, .tv_nsec = nsec };
+    if (nsec > 1000 * 1000 * 1000) {
+        sum.tv_sec--;
+        sum.tv_nsec = nsec - 1000*1000*1000;
+    }
     return sum;
 }
 
@@ -20,15 +40,16 @@ inline static struct timespec timespec_diff(const struct timespec a, const struc
     return diff;
 }
 
+inline static bool timespec_less(const struct timespec a, const struct timespec b) {
+    if (a.tv_sec == b.tv_sec)
+        return a.tv_nsec < b.tv_nsec;
+    return a.tv_sec < b.tv_sec;
+}
+
 struct timespec coro_yield_timered() {
-    struct timespec start, stop;
-    if (0 != clock_gettime(CLOCK_MONOTONIC, &start)) {
-        perror("First clock_gettime(CLOCK_MONOTONIC) in coro_yield_timered");
-    }
+    struct timespec start = must_clock_monotonic();
     coro_yield();
-    if (0 != clock_gettime(CLOCK_MONOTONIC, &stop)) {
-        perror("Second clock_gettime(CLOCK_MONOTONIC) in coro_yield_timered");
-    }
+    struct timespec stop = must_clock_monotonic();
     return timespec_diff(stop, start);
 }
 
@@ -43,7 +64,13 @@ struct timespec coro_yield_timered() {
  *
  * Returns a `struct timespec` that represents the total time spent sleeping in `coro_yield`.
  */
-struct timespec merge(int *out, int *from1, int len1, int *from2, int len2, bool subsort) {
+struct timespec merge(int *out, int *from1, int len1, int *from2, int len2,
+        bool subsort, struct timespec latency) {
+
+    // Used to determine when to switch
+    struct timespec next_switch = timespec_add(must_clock_monotonic(), latency);
+
+    // Used to accumulate the waiting time (for the return value)
     struct timespec wait_time = {0};
 
     if (subsort) {
@@ -53,8 +80,8 @@ struct timespec merge(int *out, int *from1, int len1, int *from2, int len2, bool
                 perror("Temp array malloc inside merge");
                 return wait_time;
             }
-            struct timespec slept = merge(tmp, from1, len1/2, from1 + len1/2, len1 - len1/2, subsort);
-            wait_time = timespec_sum(wait_time, slept);
+            struct timespec slept = merge(tmp, from1, len1/2, from1 + len1/2, len1 - len1/2, subsort, latency);
+            wait_time = timespec_add(wait_time, slept);
             memcpy(from1, tmp, sizeof (int) * len1);
             free(tmp);
         }
@@ -64,8 +91,8 @@ struct timespec merge(int *out, int *from1, int len1, int *from2, int len2, bool
                 perror("Temp array malloc inside merge");
                 return wait_time;
             }
-            struct timespec slept = merge(tmp, from2, len2/2, from2 + len2/2, len2 - len2/2, subsort);
-            wait_time = timespec_sum(wait_time, slept);
+            struct timespec slept = merge(tmp, from2, len2/2, from2 + len2/2, len2 - len2/2, subsort, latency);
+            wait_time = timespec_add(wait_time, slept);
             memcpy(from2, tmp, sizeof (int) * len2);
             free(tmp);
         }
@@ -81,23 +108,37 @@ struct timespec merge(int *out, int *from1, int len1, int *from2, int len2, bool
 
         *out++ = mn;
         
-        // Yield on every iteration
-        wait_time = timespec_sum(wait_time, coro_yield_timered());
+        // If it's time to, yield, adding the wait time to `wait_time` and updating `next_switch`
+        if (timespec_less(next_switch, /*now*/must_clock_monotonic())) {
+            wait_time = timespec_add(wait_time, coro_yield_timered());
+            next_switch = timespec_add(must_clock_monotonic(), latency);
+        }
     }
 
     while (i < from1 + len1) {
         *out++ = *i++;
-        // Yield on every iteration
-        wait_time = timespec_sum(wait_time, coro_yield_timered());
+        // If it's time to, yield, adding the wait time to `wait_time` and updating `next_switch`
+        if (timespec_less(next_switch, /*now*/must_clock_monotonic())) {
+            wait_time = timespec_add(wait_time, coro_yield_timered());
+            next_switch = timespec_add(must_clock_monotonic(), latency);
+        }
     }
     while (j < from2 + len2) {
         *out++ = *j++;
-        // Yield on every iteration
-        wait_time = timespec_sum(wait_time, coro_yield_timered());
+        // If it's time to, yield, adding the wait time to `wait_time` and updating `next_switch`
+        if (timespec_less(next_switch, /*now*/must_clock_monotonic())) {
+            wait_time = timespec_add(wait_time, coro_yield_timered());
+            next_switch = timespec_add(must_clock_monotonic(), latency);
+        }
     }
 
     return wait_time;
 }
+
+struct cor_inp {
+    char *filename;
+    struct timespec latency;
+};
 
 struct cor_res {
     int *array;
@@ -109,15 +150,11 @@ struct cor_res {
 static long long
 sort_file(void *data)
 {
-    struct timespec start;
-    if (0 != clock_gettime(CLOCK_MONOTONIC, &start)) {
-        perror("First clock_gettime(CLOCK_MONOTONIC) in sort_file");
-        return -1;
-    }
+    struct timespec start = must_clock_monotonic();
 
-    const char *filename = data;
+    struct cor_inp *input = (struct cor_inp *)data;
     
-    FILE *f = fopen(filename, "r");
+    FILE *f = fopen(input->filename, "r");
     if (f == NULL) {
         perror("fopen of input file");
         return -1;
@@ -144,14 +181,14 @@ sort_file(void *data)
     // the actual amount of memory to free.
     arr_size = arr_idx;
 
-    (void)printf("read %d numbers from %s\n", arr_size, filename);
+    (void)fprintf(stderr, "read %d numbers from %s\n", arr_size, input->filename);
 
     int *sorted = malloc(sizeof (int) * arr_size);
     if (sorted == NULL) {
         perror("malloc for sorted array");
         return -1;
     }
-    struct timespec wait_time = merge(sorted, array, arr_size, NULL, 0, true);
+    struct timespec wait_time = merge(sorted, array, arr_size, NULL, 0, true, input->latency);
     
     free(array);
 
@@ -161,11 +198,7 @@ sort_file(void *data)
         return -1;
     }
 
-    struct timespec stop;
-    if (0 != clock_gettime(CLOCK_MONOTONIC, &stop)) {
-        perror("Second clock_gettime(CLOCK_MONOTONIC) in sort_file");
-        return -1;
-    }
+    struct timespec stop = must_clock_monotonic();
 
     res->array = sorted;
     res->arr_size = arr_size;
@@ -182,14 +215,32 @@ main(int argc, char **argv)
     _Static_assert (sizeof (long long) == sizeof (void *), "`long long` is expected pointer size: "
             "coroutine functions can't return pointers");
 
+    if (argc <= 2) {
+        fputs("Too few command-line arguments\n", stderr);
+        return 1;
+    }
+
+    char *parse_check;
+    double target_latency_sec = strtod(argv[1], &parse_check);
+    if (*parse_check) {
+        puts("Error: the first command-line argument must be a floating-point target latency value");
+        return 2;
+    }
+    double latency_sec = target_latency_sec / (argc - 2);
+
+    struct timespec latency = timespec_from_double(latency_sec);
+
     /* Initialize our coroutine global cooperative scheduler. */
     coro_sched_init();
 
-    for (int i = 1; i < argc; ++i) {
-        coro_new(sort_file, argv[i]);
+    struct cor_inp inputs[argc - 2];
+    for (int i = 2; i < argc; ++i) {
+        inputs[i - 2].filename = argv[i];
+        inputs[i - 2].latency = latency;
+        coro_new(sort_file, (void *)&inputs[i - 2]);
     }
 
-    struct cor_res results[argc - 1];
+    struct cor_res results[argc - 2];
     int res_idx = 0;
 
     /* Wait for all the coroutines to end. */
@@ -225,7 +276,7 @@ main(int argc, char **argv)
     int len1 = 0, len2 = 0;
 
     for (int i = 0; i < res_idx; ++i) {
-        (void)merge(sorted1, sorted2, len2, results[i].array, results[i].arr_size, false);
+        (void)merge(sorted1, sorted2, len2, results[i].array, results[i].arr_size, false, latency);
         len1 = results[i].arr_size + len2;
         free(results[i].array);  // Won't use this array again
         SWAP(int *, sorted1, sorted2);
