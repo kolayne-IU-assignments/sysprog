@@ -25,7 +25,7 @@ inline static struct timespec timespec_add(const struct timespec a, const struct
     unsigned long long nsec = a.tv_nsec + b.tv_nsec;
     struct timespec sum = { .tv_sec = a.tv_sec + b.tv_sec, .tv_nsec = nsec };
     if (nsec > 1000 * 1000 * 1000) {
-        sum.tv_sec--;
+        sum.tv_sec++;
         sum.tv_nsec = nsec - 1000*1000*1000;
     }
     return sum;
@@ -140,7 +140,7 @@ struct sort_file_inp {
     int worker_id;
     // `filename` set to `NULL` represents that the worker is waiting for a file;
     // `filename` set to `(char *)-1` represents a worker in an invalid state (uninitialized / terminated);
-    // other values of `filename` should be treated naturally.
+    // other values of `filename` shall be treated naturally.
     char *filename;
     struct timespec latency;
 
