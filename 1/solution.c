@@ -192,7 +192,7 @@ sort_file(void *data)
         while(1 == fscanf(f, "%d", &val)) {
             if (arr_idx >= arr_size) {
                 arr_size = 1 + arr_size * 2;
-                unsorted = reallocarray(unsorted, sizeof (int), arr_size);
+                unsorted = (int *)realloc(unsorted, arr_size * sizeof (int));
                 if (unsorted == NULL) {
                     perror("reallocarray");
                     return -1;
@@ -201,6 +201,7 @@ sort_file(void *data)
             unsorted[arr_idx++] = val;
         }
 
+        (void)fclose(f);
         (void)fprintf(stderr, "Worker %d has read %d numbers\n", dnp->worker_id, arr_idx);
 
         dnp->array = malloc(sizeof (int) * arr_idx);
@@ -330,15 +331,15 @@ main(int argc, char **argv)
         return 3;
     }
 
-    double target_latency_sec = strtod(argv[1], &parse_check);
+    double target_latency_usec = strtod(argv[1], &parse_check);
     if (*parse_check) {
         fputs("Error: the first command-line argument must be a floating-point target latency value", stderr);
         return 2;
     }
-    double latency_sec = target_latency_sec / workers_count;
-    printf("Each worker will be given the %f latency\n", latency_sec);
+    double latency_usec = target_latency_usec / workers_count;
+    printf("Each worker will be given the %fus latency\n", latency_usec);
 
-    struct timespec latency = timespec_from_double(latency_sec);
+    struct timespec latency = timespec_from_double(latency_usec / 1000. / 1000.);
 
     /* Initialize our coroutine global cooperative scheduler. */
     coro_sched_init();
@@ -372,9 +373,10 @@ main(int argc, char **argv)
             (void)printf("Distributor has terminated\n");
         } else {
             struct sort_file_res *res = (struct sort_file_res *)status;
-            (void)printf("Coroutine %d finished in %lld.%.9ld seconds with %d switches\n",
-                    res->worker_id, (long long)res->time_spent.tv_sec, res->time_spent.tv_nsec,
-                    res->switch_count);
+
+            double us = res->time_spent.tv_sec * 1000 * 1000 + res->time_spent.tv_nsec / 1000.;
+            (void)printf("Coroutine %d finished in %.3fus with %d switches\n",
+                    res->worker_id, us, res->switch_count);
             free(res);
         }
         coro_delete(c);
