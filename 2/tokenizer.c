@@ -1,9 +1,27 @@
 #include <stdbool.h>
 
-/**
- * A memory-inefficient but very implementation-convenient way to handle
- * backslash-escaped characters.
+/*
+ * In the commands parsing process there are two kinds of characters:
+ * _usual_ (have no special meaning whatsoever) and _special_ (have some
+ * special syntactical meaning either at the low parsing level (the ones that
+ * affect the parsing itself) and at the high parsing level (the ones that
+ * only affect the semantics of the shell but not the parsing process).
+ * Low-level special symbols are also referred to as _parser-special_,
+ * hugh-level special symbols are referred to as _command-special_.
  *
+ * Parser-special symbols are: backalsh (\) and quotation mark (").
+ * Command-special symbols are: vertical slash (|), and
+ * the greater symbol (>).
+ * Usual symbols are all the non-special characters, except for '\0'.
+ * The null character is always treated as an end of string, unless stated
+ * otherwise.
+ *
+ * The parsing process is implemented using the character coloring, which is
+ * rather memory-inefficient (requires O(N) auxilary memory) but quite
+ * convenient to implemented.
+ */
+
+/**
  * Accepts two parameters: the NULL-terminated input string `original` and
  * a character array `color`, which must have the capacity to store `original`
  * (i.e. of size `strlen(original) + 1`), may not be initialized.
@@ -52,7 +70,7 @@ bool escape_and_color(char *const original, char *const color) {
 }
 
 #define WHITESPACE " \f\n\r\t\v"  // According to isspace(3)
-#define SPECIAL " >|"  // TODO: & and ; are coming later
+#define COMMAND_SPECIAL ">|"  // TODO: & and ; are coming later
 
 /**
  * Returns `true` if the given character s either a whitespace
@@ -60,7 +78,7 @@ bool escape_and_color(char *const original, char *const color) {
  * which indicates that the current token is over.
  */
 inline static bool is_word_separator(char c) {
-    return (bool)strchr(WHITESPACE SPECIAL, c);
+    return (bool)strchr(WHITESPACE COMMAND_SPECIAL, c);
 }
 
 /**
@@ -79,7 +97,7 @@ int next_token(const char *const inp) {
         int read = 0;
         // Read symbols that are neither a whitespace nor special (including
         // quotation).
-        int res = sscanf(inp + pos, "%*[^\"" WHITESPACE SPECIAL "]%n", &read);
+        int res = sscanf(inp + pos, "%*[^\"" WHITESPACE COMMAND_SPECIAL "]%n", &read);
 
         // If the next character is not a quotation, nothing to read further
         pos += read;
@@ -112,6 +130,30 @@ int next_token(const char *const inp) {
     // Try to read, modifying `pos` directly. Regardless of `sscanf`'s success,
     // should return the position we moved to (which remains zero if there was
     // nothing to scan).
-    (void)sscanf(inp, "%*[" SPECIAL "]%n", &pos);
+    (void)sscanf(inp, "%*[" COMMAND_SPECIAL "]%n", &pos);
     return pos;
+}
+
+/**
+ * Removes the quotation marks from the original null-terminated string, shifting
+ * its other characters to the left, and restores the escaped characters from
+ * `color` (if there was an escaped quotation mark, it is restored as if a usual
+ * character). Returns the number of quotation marks found (i.e. the left shift
+ * of the end of the string).
+ */
+int uncolor_unquote(char *const s, const char *const color) {
+    int read = 0, write = 0;
+    for (; s[read]; ++read, ++write) {
+        while (s[read] == '"')
+            ++read;
+        if (!s[read])
+            break;
+
+        if (color[read])
+            s[write] = color[read];
+        else
+            s[write] = s[read];
+    }
+    s[write] = s[read];  // Copy the last '\0' too
+    return read - write;
 }
