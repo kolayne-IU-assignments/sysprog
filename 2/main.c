@@ -4,55 +4,45 @@
 #include "tokenizer.c"
 #include "parse_command.c"
 
+void unwrap_p(const struct piped_commands *pc) {
+    printf("  argc : %d\n", pc->_argc);
+    printf("  outfile : %s\n", pc->outfile);
+    printf("  append : %d\n", pc->append);
+    printf("  argv : \n");
+    for (char **s = pc->argv; *s; ++s) {
+        printf("    %s\n", *s);
+    }
+    if (pc->next) {
+        printf(" |\n");
+        unwrap_p(pc->next);
+    }
+}
+
+void unwrap_s(struct sequenced_commands *sc) {
+    printf("/\n");
+    unwrap_p(sc->p_head);
+}
+
 int main() {
     char cmd[] = "echo \\\"123 \"a\"\"b\" |grep    123| grep 456|grep  789  | cat >> f | echo \"\" \"gh\" i\"j\"k>l";
     printf("Original string: %s\n", cmd);
 
-    struct sequenced_commands cmds = parse_command_line(cmd);
+    struct parse_result p = parse_command_line(cmd);
+    assert(!p.err);
+    unwrap_s(&p.s_head);
+    destroy_sequenced_commands(&p.s_head);
 
-    /*char *future_pointers[255];
-    int fut_put = 0;
+    puts("\n");
 
-    char color[strlen(cmd) + 1];
-    if (escape_and_color(cmd, color)) {
-        // Stage 1: find them all
-        int now = 0;
-        while(1) {
-            now += whitespace_advance(cmd + now);
-
-            int read = next_token(cmd + now);
-            if (read <= 0) {
-                printf("next_token returned %d\n", read);
-                break;
-            }
-            printf("Next token: %.*s\n", read, cmd + now);
-            if (!is_word_separator(cmd[now]))
-                future_pointers[fut_put++] = cmd + now;
-            now += read;
+    char *s;
+    while (EOF != scanf(" %m[^\n]", &s)) {
+        struct parse_result p = parse_command_line(s);
+        if (p.err) {
+            printf(": %s\n", p.err);
+        } else {
+            unwrap_s(&p.s_head);
+            destroy_sequenced_commands(&p.s_head);
         }
-
-        // Stage 2: terminate strings
-        now = 0;
-        while(1) {
-            now += whitespace_advance(cmd + now);
-
-            int read = next_token(cmd + now);
-            if (read <= 0) {
-                break;
-            }
-            int old = now;
-            now += read;
-            if (!is_word_separator(cmd[old]))
-                cmd[now++] = '\0';
-        }
-
-        // Stage 3: check that the arguments are correct
-        puts("\nNow cmd-line arguments only:");
-        for (int i = 0; i < fut_put; ++i) {
-            printf("%s ", future_pointers[i]);
-        }
-        puts("");
-    } else {
-        puts("\\ at the end of input");
-    }*/
+        free(s);
+    }
 }
