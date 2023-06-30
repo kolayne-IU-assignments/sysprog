@@ -1,8 +1,10 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include "tokenizer.c"
-#include "parse_command.c"
+#include <assert.h>
+
+#include "parse_command.h"
 
 void unwrap_p(const struct piped_commands *pc) {
     printf("  argc : %d\n", pc->_argc);
