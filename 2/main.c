@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,6 +6,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #include <errno.h>
 
 #include "parse_command.h"
@@ -30,22 +32,25 @@ void unwrap_s(struct sequenced_commands *sc) {
     unwrap_p(sc->p_head);
 }
 
+
+// `acc` parameter is just a hack to enforce tail recursion. The outer caller shall specify `0`.
+__attribute__((pure)) size_t count_pipes(const struct piped_commands *const pc, int acc) {
+    if(!pc)
+        return acc;
+    return count_pipes(pc->next, acc+1);
+}
+
+
 int main() {
     char cmd[] = "echo \\\"123 \"a\"\"b\" |grep    123| grep 456|grep  789  | cat >> f | echo \"\" \"gh\" i\"j\"k>l";
-    printf("Original string: %s\n", cmd);
+    //printf("Original string: %s\n", cmd);
 
     struct parse_result p = parse_command_line(cmd);
     assert(!p.err);
-    unwrap_s(&p.s_head);
+    //unwrap_s(&p.s_head);
     destroy_sequenced_commands(&p.s_head);
 
-    puts("\n");
-
-    // Make sure I don't have any children yet (for example if my parent made children and exec'ed me)
-    if (0 == waitpid(-1, NULL, WNOHANG) || errno != ECHILD) {
-        fprintf(stderr, "I already have children who I have not born. Refusing to continue\n");
-        return EXIT_FAILURE;
-    }
+    //puts("\n");
 
     char *s;
     while (EOF != scanf(" %m[^\n]", &s)) {
@@ -53,23 +58,45 @@ int main() {
         if (p.err) {
             printf(": %s\n", p.err);
         } else {
-            switch (fork()) {
+            const size_t children_count = count_pipes(p.s_head.p_head, 0);
+
+            // Children will write their pids into this pipe, I will wait for them.
+            // It would not be safe to just do the correct number of `wait`s, as the
+            // children (after `exec`) may create new siblings, which will turn to my
+            // children, which would lead to a mess.
+            //
+            // Instead, before children `exec`, they write their pid to the stream,
+            // I read it from here and reap them.
+            int children_pids_pipe[2];
+            int err = pipe(children_pids_pipe);
+            if(err) {
+                fprintf(stderr, "Failed to pipe: %s\n", strerror(errno));
+                continue;
+            }
+
+            pid_t res = fork();
+            switch (res) {
                 case 0:
-                    process_piped_commands(p.s_head.p_head);
+                    // Child
+                    process_piped_commands(p.s_head.p_head, children_pids_pipe[1]);
                     // Won't return
                     assert(false);
                 case -1:
                     fprintf(stderr, "Couldn't fork\n");
                     continue;
-                default:
-                    // Wait for all children to terminate.
-                    // If all children were successfully created then I will reap them all;
-                    // If some of them failed to clone, the excessive `wait`s will fail silently.
-                    for(struct piped_commands *ps = p.s_head.p_head; ps; ps = ps->next) {
-                        int res = wait(NULL);
-                        assert(res == 0 || errno == ECHILD);
-                    }
             }
+
+            err = close(children_pids_pipe[1]);
+            assert(!err);  // If failed to close, will self-deadlock below
+
+            pid_t child;
+            size_t readb;
+            while (0 != (readb = read(children_pids_pipe[0], &child, sizeof child))) {
+                assert(readb == sizeof child);  // Expect no errors to occur
+                int res = waitpid(child, NULL, 0);
+                assert(res > 0);
+            }
+            (void)close(children_pids_pipe[0]);
 
             destroy_sequenced_commands(&p.s_head);
         }
