@@ -70,6 +70,8 @@ int main() {
                         assert(res == 0 || errno == ECHILD);
                     }
             }
+
+            destroy_sequenced_commands(&p.s_head);
         }
         free(s);
     }

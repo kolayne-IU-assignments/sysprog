@@ -37,6 +37,10 @@ bool is_operator(const char *op, const char *s) {
     return false;
 }
 
+
+/// Allocate and default-initialize a `struct piped_commands`
+static struct piped_commands *new_pc();
+
 struct parse_result parse_command_line(char *cmd) {
     struct parse_result res = {.err = NULL, .s_head = {.next = NULL}};
     goto normal;
@@ -174,9 +178,10 @@ normal:
     // Last command's argv shall be NULL-terminated too!
     p_cur->argv[cur_arg] = NULL;
 
-    int terminated_times = 1;
+    int terminated_times = 0;
     pos = 0;
-    while (1) {  // Third pass: null-terminate args
+    bool done = false;
+    while (!done) {  // Third pass: null-terminate args
         pos += advance_whitespace(cmd + pos);
 
         int read = next_token(cmd + pos);
@@ -187,6 +192,7 @@ normal:
         pos += read;
         // If the just read token is a usual argument or a file name, terminate its string.
         if (!is_cm_special(cmd[old])) {
+            done = cmd[pos] == '\0';
             cmd[pos++] = '\0';
             ++terminated_times;
         }

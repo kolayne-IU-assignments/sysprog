@@ -26,9 +26,6 @@ struct piped_commands {
     bool append;
 };
 
-/// Allocate and default-initialize a `struct piped_commands`
-static struct piped_commands *new_pc();
-
 /**
  * A linked list of groups of piped commands combined in a conditional sequence.
  * For the last command group, `.next` is `NULL`.
