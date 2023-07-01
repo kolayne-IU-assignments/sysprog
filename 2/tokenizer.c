@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <assert.h>
 
 #include "tokenizer.h"
 
@@ -43,25 +44,30 @@ bool is_cm_special(char c) {
 int next_token(const char *const inp) {
     int pos = 0;
 
+    char quot_fmt[] = "%*[^\1]%n";
+    const size_t quot = 4;
+    assert(quot_fmt[quot] == '\1');
+
     do {
         // Try to read a non-special token
 
         int read = 0;
         // Read symbols that are neither a whitespace nor command-special
         // nor a quotation mark.
-        int res = sscanf(inp + pos, "%*[^\"" WHITESPACE COMMAND_SPECIAL "]%n",
+        (void)sscanf(inp + pos, "%*[^\"'" WHITESPACE COMMAND_SPECIAL "]%n",
             &read);
 
         // If the next character is not a quotation mark, nothing to read further
         pos += read;
-        if (inp[pos] != '"')
+        if (inp[pos] != '"' && inp[pos] != '\'')
             break;
 
         // If _is_ a quotation, read until the next quotation mark
+        quot_fmt[quot] = inp[pos];
         ++pos;
         read = 0;
-        res = sscanf(inp + pos, "%*[^\"]%n", &read);
-        if (res == EOF || inp[pos + read] != '"') {
+        int res = sscanf(inp + pos, quot_fmt, &read);
+        if (res == EOF || inp[pos + read] != quot_fmt[quot]) {
             return -1;
         }
         pos += read + 1;  // +1 for the quotation mark
@@ -89,9 +95,15 @@ int next_token(const char *const inp) {
 
 int uncolor_unquote(char *const s, const char *const color) {
     int read = 0, write = 0;
+    char current_quote = '\0';
     for (; s[read]; ++read, ++write) {
-        while (s[read] == '"')
+        if (s[read] == current_quote) {
+            current_quote = '\0';
             ++read;
+        } else if (!current_quote && (s[read] == '"' || s[read] == '\'')) {
+            current_quote = s[read++];
+        }
+
         if (!s[read])
             break;
 

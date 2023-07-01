@@ -33,11 +33,28 @@ void unwrap_s(struct sequenced_commands *sc) {
 }
 
 
-// `acc` parameter is just a hack to enforce tail recursion. The outer caller shall specify `0`.
-__attribute__((pure)) size_t count_pipes(const struct piped_commands *const pc, int acc) {
-    if(!pc)
-        return acc;
-    return count_pipes(pc->next, acc+1);
+/**
+ * Returns `true` if `pc` was a special action, thus, no need to perform anything else.
+ */
+bool handle_special(const struct piped_commands *const pc) {
+    if (pc->next)
+        return false;
+
+    if (!strcmp(pc->argv[0], "exit")) {
+        fclose(stdin);
+        return true;
+    } else if (!strcmp(pc->argv[0], "cd")) {
+        // TODO: merge this with another implementation of `cd`
+        if (pc->argv[1] != NULL && pc->argv[2] == NULL) {
+            if (0 > chdir(pc->argv[1])) {
+                perror("Failed to chdir");
+            }
+        } else {
+            fprintf(stderr, "cd requires exatly one argument\n");
+        }
+        return true;
+    }
+    return false;
 }
 
 
@@ -58,7 +75,8 @@ int main() {
         if (p.err) {
             printf(": %s\n", p.err);
         } else {
-            const size_t children_count = count_pipes(p.s_head.p_head, 0);
+            if (handle_special(p.s_head.p_head))
+                goto handle_out;
 
             // Children will write their pids into this pipe, I will wait for them.
             // It would not be safe to just do the correct number of `wait`s, as the
@@ -71,7 +89,7 @@ int main() {
             int err = pipe(children_pids_pipe);
             if(err) {
                 fprintf(stderr, "Failed to pipe: %s\n", strerror(errno));
-                continue;
+                goto handle_out;
             }
 
             pid_t res = fork();
@@ -83,7 +101,7 @@ int main() {
                     assert(false);
                 case -1:
                     fprintf(stderr, "Couldn't fork\n");
-                    continue;
+                    goto handle_out;
             }
 
             err = close(children_pids_pipe[1]);
@@ -98,6 +116,7 @@ int main() {
             }
             (void)close(children_pids_pipe[0]);
 
+handle_out:
             destroy_sequenced_commands(&p.s_head);
         }
         free(s);

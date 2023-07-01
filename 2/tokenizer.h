@@ -11,7 +11,7 @@
  * Low-level special symbols are also referred to as _parser-special_,
  * high-level special symbols are referred to as _command-special_.
  *
- * Parser-special symbols are: backalsh (\) and quotation mark (").
+ * Parser-special symbols are: backalsh (\) and quotation marks (" or ').
  * Command-special symbols are: vertical slash (|) and
  * the greater symbol (>).
  * Usual symbols are all the non-special characters, except for '\0'.
