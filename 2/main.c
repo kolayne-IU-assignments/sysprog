@@ -15,26 +15,6 @@
 #include "errors.h"
 
 
-void unwrap_p(const struct piped_commands *pc) {
-    printf("  argc : %d\n", pc->_argc);
-    printf("  outfile : %s\n", pc->outfile);
-    printf("  append : %d\n", pc->append);
-    printf("  argv : \n");
-    for (char **s = pc->argv; *s; ++s) {
-        printf("    %s\n", *s);
-    }
-    if (pc->next) {
-        printf(" |\n");
-        unwrap_p(pc->next);
-    }
-}
-
-void unwrap_s(struct sequenced_commands *sc) {
-    printf("/\n");
-    unwrap_p(sc->p_head);
-}
-
-
 /**
  * `sza_excl` shall not include the null terminator (i.e. be equal to `strlen`);
  * `szb_incl` shall include the null terminator (i.e. be `strlen` + 1).
@@ -44,11 +24,15 @@ void unwrap_s(struct sequenced_commands *sc) {
  * is invalidated), unless an error.
  *
  * `b` must be a pointer to a string (allocation does not matter, `b` is not freed).
+ *
+ * `a` is freed even if reallocation failed.
  */
-char *realloc_append(char *a, const char *b, size_t sza_excl, size_t szb_incl) {
+char *realloc_append_always_free(char *a, const char *b, size_t sza_excl, size_t szb_incl) {
     char *res = realloc(a, sza_excl + szb_incl);
-    if (res == NULL)
+    if (res == NULL) {
+        free(a);
         return NULL;
+    }
     memcpy(res + sza_excl, b, szb_incl);
     return res;
 }
@@ -67,13 +51,6 @@ struct parse_result read_and_parse_command_line(char **to_free) {
     // `prev_dup` stores the `strdup`ed version of `prev` that is fed into
     // `parse_command_line`. It shall not be freed before the corresponding
     // `struct parse_result` is destroyed.
-    //
-    // Note that it is allocated and freed in a peculiar manner: as we must keep
-    // the value of `res` unchanged until the next parsing attempt (which may
-    // take place _several_ iterations later due to e.g. a sequence of line
-    // breaks), `prev_dup` corresponding to the last parsing attempt is freed
-    // just before the next parsing attempt (or, in case of successful parsing,
-    // not freed at all and returned to the caller instead).
     char *prev_dup = NULL;
 
     // Keep reading lines until a complete command is consumed (or the input is over)
@@ -92,20 +69,26 @@ struct parse_result read_and_parse_command_line(char **to_free) {
                 // If a backslash symbol follows the string instead of a NULL terminator,
                 // it means the last input ended with a backslash, thus, the current newline
                 // character should not be stored as pasrt of the command, so, do nothing.
+                continue;
             } else {
                 // Otherwise, we're inside a quotation right now, so the newline character
                 // should be preserved.
-                prev = realloc_append(prev, "\n", prev_len, 2);
-                ++prev_len;
+                prev = realloc_append_always_free(prev, "\n", prev_len, 2);
+                if (prev) {
+                    ++prev_len;
+                    continue;
+                } else {
+                    res.err = err_oom;
+                    break;
+                }
             }
-
-            continue;
         } else if (sres == EOF) {
             // The input is over. If it failed on the first iteration (empty `prev`),
             // indicate that the input is over, otherwise return the previous results
             // (below).
             if (!prev)
                 res.err = err_input_is_over;
+            break;
         } else {
             // Successful input. Combine with the previous data and attempt to parse.
 
@@ -118,40 +101,52 @@ struct parse_result read_and_parse_command_line(char **to_free) {
             }
 
             size_t s_len = strlen(s);
-            char *combined = realloc_append(prev, s, prev_len, s_len + 1);
+            prev = realloc_append_always_free(prev, s, prev_len, s_len + 1);
             free(s);
 
-            free(prev_dup);
-            if (!combined || !(prev_dup = strdup(combined))) {
-                // Out of memory. Indicate that
+            if (!prev || !(prev_dup = strdup(prev))) {
+                // Out of memory. Report it.
                 res.err = err_oom;
+                break;
             } else {
-                prev = combined;
                 prev_len += s_len;
                 res = parse_command_line(prev_dup);
 
-                // Note: here it is safe to compare strings as pointers because `res.err`
-                // may only be assigned to a global constant defined in errors.c
+                if (res.err) {
+                    free(prev_dup);
+                    prev_dup = NULL;
 
-                if (res.err == err_trailing_backslash || res.err == err_unclosed_quot) {
-                    if (res.err == err_trailing_backslash) {
-                        // Remove backslash from the final command
-                        --prev_len;
+                    // Note: here it is safe to compare strings as pointers because `res.err`
+                    // may only be assigned to a global constant defined in errors.c
+
+                    if (res.err == err_trailing_backslash || res.err == err_unclosed_quot) {
+                        if (res.err == err_trailing_backslash) {
+                            // Remove backslash from the final command
+                            --prev_len;
+                        }
+
+                        continue;
+                    } else {
+                        // If another error, report it.
+                        break;
                     }
-
-                    continue;
+                } else {
+                    /* Parsed successfully! Just exit the loop below. */
+                    break;
                 }
             }
         }
 
-        // If reached here, no need to continue reading.
-        break;
+        // Unreachable: either a `continue` or a `break` in every
+        // possible branch outcome above.
+        assert(false);
     }
 
     // Either failed to `scanf` this time (so return results of the previous iteration),
     // or an error (other than quotation/backslash thing) occurred this time (so return it),
     // or everything successful! (so return it).
-    free(prev);
+    free(prev);  // Note: `prev` is either a good thing that came from `realloc_append_always_free`,
+                 // or `NULL` that came from `realloc_append_always_free`.
     *to_free = prev_dup;
     return res;
 }
@@ -201,16 +196,6 @@ bool handle_special(const struct piped_commands *const pc) {
 
 
 int main() {
-    char cmd[] = "echo \\\"123 \"a\"\"b\" |grep    123| grep 456|grep  789  | cat >> f | echo \"\" \"gh\" i\"j\"k>l";
-    //printf("Original string: %s\n", cmd);
-
-    struct parse_result p = parse_command_line(cmd);
-    assert(!p.err);
-    //unwrap_s(&p.s_head);
-    destroy_sequenced_commands(&p.s_head);
-
-    //puts("\n");
-
     while (1) {
         (void)scanf(" ");  // Skip whitespace between commands
         char *to_free;

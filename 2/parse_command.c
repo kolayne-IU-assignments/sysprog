@@ -199,7 +199,7 @@ normal:
     }
 
     // Finally, restore the escaped characters from colors. There is no problem to do it
-    // even so lately because:
+    // even this late because:
     // - The first two runs had no effect on `cmd` at all
     // - In the last run, we only set some characters to '\0' and we know for sure those
     //   were either whitespaces or (not escaped) command-special characters. The length

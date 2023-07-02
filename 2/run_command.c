@@ -44,7 +44,7 @@ __attribute__((noreturn)) void process_piped_commands(const struct piped_command
     pid_t self = getpid();
     size_t written = write(write_my_pid_fd, &self, sizeof self);
     assert(written == sizeof self);
-    
+
     if(pc->next) {
         int fildes[2];
         if (0 > pipe(fildes)) {
