@@ -5,16 +5,41 @@
 
 #include "tokenizer.h"
 
+bool is_word_separator(char c) {
+    return (bool)strchr(WHITESPACE COMMAND_SPECIAL, c);
+}
+
+bool is_cm_special(char c) {
+    return c && (bool)strchr(COMMAND_SPECIAL, c);
+}
+
+static bool is_special(char c) {
+    return is_cm_special(c) || c == '\'' || c == '"' || c == '\\';
+}
+
 bool escape_and_color(char *const original, char *const color) {
     // Invariant: `write <= read`. In case of backslash, the string
     // is "shifted" back (and the corresponding char is colored).
     int read = 0, write = 0;
+    char in_quot = '\0';
     for (; original[read]; ++read, ++write) {
-        if (original[read] == '\\') {
-            if (!original[read + 1])
-                return false;
+        // So damn sad that I had to make `escape_and_color` quotation aware :(
+        if (original[read] == in_quot)
+            in_quot = '\0';
+        else if (!in_quot && (original[read] == '\'' || original[read] == '"'))
+            in_quot = original[read];
 
-            ++read;
+        if (original[read] == '\\') {
+            if (!original[read + 1]) {
+                color[write] = '\0';  // Make sure when the string is restored this is not overwritten
+                return false;
+            }
+
+            // Additional complication here: if inside a quotation and the following character
+            // is not special, then both backslash and that character shall be preserved.
+            if (!in_quot || is_special(original[read + 1]))
+                ++read;
+
             // The actual escaped symbol is stored in `color[write]` and will
             // be interpreted as a raw literal;
             // In the original string the corresponding character is replaced with
@@ -31,14 +56,6 @@ bool escape_and_color(char *const original, char *const color) {
     }
     original[write] = original[read];  // Copy the `\0` too
     return true;
-}
-
-bool is_word_separator(char c) {
-    return (bool)strchr(WHITESPACE COMMAND_SPECIAL, c);
-}
-
-bool is_cm_special(char c) {
-    return c && (bool)strchr(COMMAND_SPECIAL, c);
 }
 
 int next_token(const char *const inp) {

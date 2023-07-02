@@ -35,31 +35,6 @@ void unwrap_s(struct sequenced_commands *sc) {
 
 
 /**
- * Returns `true` if `pc` was a special action, thus, no need to perform anything else.
- */
-bool handle_special(const struct piped_commands *const pc) {
-    if (pc->next)
-        return false;
-
-    if (!strcmp(pc->argv[0], "exit")) {
-        fclose(stdin);
-        return true;
-    } else if (!strcmp(pc->argv[0], "cd")) {
-        // TODO: merge this with another implementation of `cd`
-        if (pc->argv[1] != NULL && pc->argv[2] == NULL) {
-            if (0 > chdir(pc->argv[1])) {
-                perror("Failed to chdir");
-            }
-        } else {
-            fprintf(stderr, "cd requires exatly one argument\n");
-        }
-        return true;
-    }
-    return false;
-}
-
-
-/**
  * `sza_excl` shall not include the null terminator (i.e. be equal to `strlen`);
  * `szb_incl` shall include the null terminator (i.e. be `strlen` + 1).
  *
@@ -88,6 +63,18 @@ struct parse_result read_and_parse_command_line(char **to_free) {
     char *prev = NULL;
     size_t prev_len = 0;
 
+    // `prev_dup` stores the `strdup`ed version of `prev` that is fed into
+    // `parse_command_line`. It shall not be freed before the corresponding
+    // `struct parse_result` is destroyed.
+    //
+    // Note that it is allocated and freed in a peculiar manner: as we must keep
+    // the value of `res` unchanged until the next parsing attempt (which may
+    // take place _several_ iterations later due to e.g. a sequence of line
+    // breaks), `prev_dup` corresponding to the last parsing attempt is freed
+    // just before the next parsing attempt (or, in case of successful parsing,
+    // not freed at all and returned to the caller instead).
+    char *prev_dup = NULL;
+
     // Keep reading lines until a complete command is consumed (or the input is over)
     while (1) {
         char *s;
@@ -102,8 +89,8 @@ struct parse_result read_and_parse_command_line(char **to_free) {
 
             if (prev[prev_len] == '\\') {
                 // If a backslash symbol follows the string instead of a NULL terminator,
-                // it means the last string finished with a backslash, thus the newline
-                // symbol should not be stored as pasrt of the command, so, do nothing.
+                // it means the last input ended with a backslash, thus, the current newline
+                // character should not be stored as pasrt of the command, so, do nothing.
             } else {
                 // Otherwise, we're inside a quotation right now, so the newline character
                 // should be preserved.
@@ -121,7 +108,7 @@ struct parse_result read_and_parse_command_line(char **to_free) {
         } else {
             // Successful input. Combine with the previous data and attempt to parse.
 
-            if (s[0] == '#') {
+            if (s[0] == '#' && res.err != err_unclosed_quot) {  // Looks like a comment
                 free(s);
                 // Consume the newline character here to not confuse the parser with it
                 char c = getc(stdin);
@@ -132,14 +119,15 @@ struct parse_result read_and_parse_command_line(char **to_free) {
             size_t s_len = strlen(s);
             char *combined = realloc_append(prev, s, prev_len, s_len + 1);
             free(s);
-            if (combined == NULL) {
+
+            free(prev_dup);
+            if (!combined || !(prev_dup = strdup(combined))) {
                 // Out of memory. Indicate that
                 res.err = err_oom;
             } else {
                 prev = combined;
                 prev_len += s_len;
-
-                res = parse_command_line(prev);
+                res = parse_command_line(prev_dup);
 
                 // Note: here it is safe to compare strings as pointers because `res.err`
                 // may only be assigned to a global constant defined in errors.c
@@ -162,9 +150,36 @@ struct parse_result read_and_parse_command_line(char **to_free) {
     // Either failed to `scanf` this time (so return results of the previous iteration),
     // or an error (other than quotation/backslash thing) occurred this time (so return it),
     // or everything successful! (so return it).
-    *to_free = prev;
+    free(prev);
+    *to_free = prev_dup;
     return res;
 }
+
+
+/**
+ * Returns `true` if `pc` was a special action, thus, no need to perform anything else.
+ */
+bool handle_special(const struct piped_commands *const pc) {
+    if (pc->next)
+        return false;
+
+    if (!strcmp(pc->argv[0], "exit")) {
+        fclose(stdin);
+        return true;
+    } else if (!strcmp(pc->argv[0], "cd")) {
+        // TODO: merge this with another implementation of `cd`
+        if (pc->argv[1] != NULL && pc->argv[2] == NULL) {
+            if (0 > chdir(pc->argv[1])) {
+                perror("Failed to chdir");
+            }
+        } else {
+            fprintf(stderr, "cd requires exatly one argument\n");
+        }
+        return true;
+    }
+    return false;
+}
+
 
 int main() {
     char cmd[] = "echo \\\"123 \"a\"\"b\" |grep    123| grep 456|grep  789  | cat >> f | echo \"\" \"gh\" i\"j\"k>l";
