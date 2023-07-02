@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
+#include <inttypes.h>
 
 #include "parse_command.h"
 #include "run_command.h"
@@ -164,8 +165,26 @@ bool handle_special(const struct piped_commands *const pc) {
         return false;
 
     if (!strcmp(pc->argv[0], "exit")) {
-        fclose(stdin);
-        return true;
+        int exit_code;
+        if (pc->argv[1] && pc->argv[2]) {
+            fprintf(stderr, "exit must have no arguments or exactly one argument\n");
+            exit_code = EXIT_FAILURE;
+        } else if (pc->argv[1]) {
+            char *inv;
+            exit_code = strtoimax(pc->argv[1], &inv, 0);
+            // Note: overflow/underflow errors are ignored
+            if (*inv) {
+                fprintf(stderr, "The argument to exit must be numeric\n");
+                exit_code = EXIT_FAILURE;
+            }
+        } else {
+            exit_code = EXIT_SUCCESS;
+        }
+
+        exit(exit_code);
+        assert(false);
+        // Would be
+        // return true;
     } else if (!strcmp(pc->argv[0], "cd")) {
         // TODO: merge this with another implementation of `cd`
         if (pc->argv[1] != NULL && pc->argv[2] == NULL) {
