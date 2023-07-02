@@ -13,7 +13,7 @@ struct piped_commands {
     // struct.
     char **argv;
 
-    // For internal use only
+    // The number of arguments in `argv` before the `NULL` terminator
     int _argc;
 
     // Command to pipe this to. Owned by the struct. `NULL` if shouldn't pipe.

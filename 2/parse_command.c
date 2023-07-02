@@ -5,6 +5,7 @@
 #include <ctype.h>
 
 #include "tokenizer.h"
+#include "errors.h"
 #include "parse_command.h"
 
 void destroy_piped_commands(struct piped_commands *pc) {
@@ -53,13 +54,13 @@ normal:
 
     res.s_head.p_head = new_pc();
     if (!res.s_head.p_head) {
-        res.err = "Internal error: out of memory";
+        res.err = err_oom;
         goto err_out;
     }
 
     char color[strlen(cmd) + 1];
     if (!escape_and_color(cmd, color)) {
-        res.err = "Parse error: backslash at the end of line is not supported";
+        res.err = err_trailing_backslash;
         goto err_out;
     }
 
@@ -90,7 +91,7 @@ normal:
         int read = next_token(cmd + pos);
         if (read < 0) {
             // Unclosed quotation mark
-            res.err = "Parse error: unclosed quotation mark";
+            res.err = err_unclosed_quot;
             goto err_out;
         } else if (read == 0) {
             break;
@@ -101,11 +102,11 @@ normal:
             read += advance_whitespace(cmd + pos + read);
             int next_read = next_token(cmd + pos + read);
             if (!next_read) {
-                res.err = "Parse error: redirect at the end of commmand";
+                res.err = err_trailing_redir;
                 goto err_out;
             }
             if (is_cm_special(cmd[pos + read])) {
-                res.err = "Parse error: redirection filename contains special characters";
+                res.err = err_invalid_filename;
                 goto err_out;
             }
             p_cur->outfile = cmd + pos + read;
@@ -113,7 +114,7 @@ normal:
         } else if (is_operator("|", cmd+pos)) {
             p_cur->next = new_pc();
             if (!p_cur->next) {
-                res.err = "Internal error: out of memory";
+                res.err = err_oom;
                 goto err_out;
             }
             p_cur = p_cur->next;
@@ -121,7 +122,7 @@ normal:
             // Comprised of command-special characters but is not a valid operator.
             // (note: it's sufficient to check just the first char due to the tokenizer
             // properties)
-            res.err = "Parse error: invalid operator";
+            res.err = err_invalid_operator;
             goto err_out;
         } else {
             // Normal-character argument
@@ -132,8 +133,7 @@ normal:
     }
 
     if (!p_cur->_argc) {
-        res.err = "Parse error: a command with no arguments "
-            "(possibly a pipe at the end of the command)";
+        res.err = err_argless_command;
         goto err_out;
     }
 
@@ -143,7 +143,7 @@ normal:
     int cur_arg = 0;
     p_cur->argv = (char **)malloc((p_cur->_argc + 1) * sizeof (char *));
     if (!p_cur->argv) {
-        res.err = "Internal error: out of memory";
+        res.err = err_oom;
         goto err_out;
     }
     while (1) {  // Second pass: allocate and fill in `argv`s
@@ -166,7 +166,7 @@ normal:
             cur_arg = 0;
             p_cur->argv = (char **)malloc((p_cur->_argc + 1) * sizeof (char *));
             if (!p_cur->argv) {
-                res.err = "Internal error: out of memory";
+                res.err = err_oom;
                 goto err_out;
             }
         } else {
