@@ -171,7 +171,7 @@ for test in tests:
 tests = [
 (["ls /"], 0),
 (["ls / | exit 123"], 123),
-(["ls /404"], 1),
+(["ls /404"], 2),
 (["ls /404", "echo test"], 0),
 ]
 for test in tests:

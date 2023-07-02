@@ -162,7 +162,7 @@ bool handle_special(const struct piped_commands *const pc) {
     if (!strcmp(pc->argv[0], "exit")) {
         int exit_code;
         if (pc->argv[1] && pc->argv[2]) {
-            fprintf(stderr, "exit must have no arguments or exactly one argument\n");
+            fprintf(stderr, "exit must get no more than one argument\n");
             exit_code = EXIT_FAILURE;
         } else if (pc->argv[1]) {
             char *inv;
@@ -187,7 +187,7 @@ bool handle_special(const struct piped_commands *const pc) {
                 perror("Failed to chdir");
             }
         } else {
-            fprintf(stderr, "cd requires exatly one argument\n");
+            fprintf(stderr, "cd must get exatly one argument\n");
         }
         return true;
     }
@@ -195,7 +195,14 @@ bool handle_special(const struct piped_commands *const pc) {
 }
 
 
+const int exit_status_default = 0;
+#if !WIFEXITED(exit_status_default) || (0 != WEXITSTATUS(exit_status_default))
+#error The value of `exit_status_default` does not satisfy the expected properties
+#endif
+
 int main() {
+    int exit_status = exit_status_default;
+
     while (1) {
         (void)scanf(" ");  // Skip whitespace between commands
         char *to_free;
@@ -241,7 +248,7 @@ int main() {
             size_t readb;
             while (0 != (readb = read(children_pids_pipe[0], &child, sizeof child))) {
                 assert(readb == sizeof child);  // Expect no errors to occur
-                int res = waitpid(child, NULL, 0);
+                int res = waitpid(child, &exit_status, 0);
                 assert(res > 0);
             }
             (void)close(children_pids_pipe[0]);
@@ -253,4 +260,11 @@ handle_out:
         // The consumed input string must be freed regardless of parsing success
         free(to_free);
     }
+
+    if (WIFEXITED(exit_status))
+        return WEXITSTATUS(exit_status);
+    else if (WIFSIGNALED(exit_status))
+        return 128 + WTERMSIG(exit_status);
+    else
+        return EXIT_FAILURE;
 }

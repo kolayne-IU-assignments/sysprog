@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <linux/sched.h>
 #include <sys/syscall.h>
+#include <inttypes.h>
 
 #include "parse_command.h"
 #include "run_command.h"
@@ -93,8 +94,21 @@ __attribute__((noreturn)) void process_piped_commands(const struct piped_command
             die("cd must get exactly one argument\n");
         }
     } else if (!strcmp(pc->argv[0], "exit")) {
-        // Note: ignoring arguments
-        exit(EXIT_SUCCESS);
+        // TODO: merge this with the other implementation of exit
+        if (pc->argv[1] && pc->argv[2])
+            die("exit must get no more than one argument\n");
+        else if (pc->argv[1]) {
+            char *inv;
+            int code = strtoimax(pc->argv[1], &inv, 0);
+            // Note: overflow/underflow errors are ignored
+            if (*inv) {
+                die("The argument to exit must be numeric\n");
+            } else {
+                exit(code);
+            }
+        } else {
+            exit(EXIT_SUCCESS);
+        }
     }
     execvp(pc->argv[0], pc->argv);
     die("Failed to exec %s: %s\n", pc->argv[0], strerror(errno));
