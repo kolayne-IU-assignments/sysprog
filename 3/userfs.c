@@ -29,6 +29,13 @@ struct block {
 	struct block *next;
 };
 
+enum {
+	PERM_WR = 1,
+	PERM_RD = 2,
+	PERM_RDWR = PERM_RD | PERM_WR,
+};
+typedef unsigned char permbits;
+
 struct file {
 	/** Double-linked list of file blocks. */
 	struct block *block_list;
@@ -58,6 +65,8 @@ struct filedesc {
 
 	struct block *block;
 	size_t offset;
+
+	permbits perm;
 };
 
 /**
@@ -125,7 +134,7 @@ static struct file *find_file(const char *name) {
 	return f;
 }
 
-int ins_new_fd(struct file *f) {
+int ins_new_fd(struct file *f, permbits perm) {
 	f->refs++;
 	struct filedesc *fd;
 	int i;
@@ -148,6 +157,7 @@ int ins_new_fd(struct file *f) {
 	fd->open = true;
 	fd->block = f->block_list;
 	fd->offset = 0;
+	fd->perm = perm;
 	return i;
 }
 
@@ -163,7 +173,17 @@ ufs_open(const char *filename, int flags)
 			return -1;
 		}
 	}
-	return ins_new_fd(f);
+	permbits perm;
+    if (flags & UFS_READ_WRITE) {
+        perm = PERM_RDWR;
+    } else if (flags & UFS_READ_ONLY) {
+        perm = PERM_RD;
+    } else if (flags & UFS_WRITE_ONLY) {
+        perm = PERM_WR;
+    } else {
+        perm = PERM_RDWR;
+    }
+	return ins_new_fd(f, perm);
 }
 
 static void seq_write(struct filedesc *fd, const char *buf, size_t *remaining) {
@@ -205,6 +225,11 @@ ufs_write(int fdi, const char *buf, const size_t size)
 		return -1;
 	}
 
+	if (!(fd->perm & PERM_WR)) {
+		ufs_error_code = UFS_ERR_NO_PERMISSION;
+		return -1;
+	}
+
 	size_t remaining = size;
 
 	seq_write(fd, buf, &remaining);
@@ -222,6 +247,11 @@ ufs_read(int fdi, char *buf, const size_t size)
 	struct filedesc *fd = &file_descriptors[fdi];
 	if (fdi < 0 || fdi >= file_descriptor_count || !fd->open) {
 		ufs_error_code = UFS_ERR_NO_FILE;
+		return -1;
+	}
+
+	if (!(fd->perm & PERM_RD)) {
+		ufs_error_code = UFS_ERR_NO_PERMISSION;
 		return -1;
 	}
 
