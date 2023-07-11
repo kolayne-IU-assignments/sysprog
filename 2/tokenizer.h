@@ -46,7 +46,7 @@ bool escape_and_color(char *original, char *color);
 
 
 #define WHITESPACE " \f\n\r\t\v"  // According to isspace(3)
-#define COMMAND_SPECIAL ">|"  // TODO: & and ; are coming later
+#define COMMAND_SPECIAL ">|&;"
 
 /**
  * Returns `true` if the given character is either a whitespace

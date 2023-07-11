@@ -43,7 +43,7 @@ bool is_operator(const char *op, const char *s) {
 static struct piped_commands *new_pc();
 
 struct parse_result parse_command_line(char *cmd) {
-    struct parse_result res = {.err = NULL, .s_head = {.next = NULL}};
+    struct parse_result res = {.err = NULL, .s_head = {}};
     goto normal;
 
 err_out:
@@ -118,6 +118,23 @@ normal:
                 goto err_out;
             }
             p_cur = p_cur->next;
+        } else if (is_operator("||", cmd+pos) || is_operator("&&", cmd+pos) ||
+                    is_operator(";", cmd+pos)) {
+            s_cur->next = calloc(1, sizeof (*s_cur->next));
+            if (!s_cur->next) {
+                res.err = err_oom;
+                goto err_out;
+            }
+            if (cmd[pos] == '|') s_cur->run_next = SKIP_SUCCESS;
+            else if (cmd[pos] == '&') s_cur->run_next = SKIP_FAILURE;
+            else s_cur->run_next = UNCONDITIONAL;
+            s_cur = s_cur->next;
+            s_cur->p_head = new_pc();
+            if (!s_cur->p_head) {
+                res.err = err_oom;
+                goto err_out;
+            }
+            p_cur = s_cur->p_head;
         } else if (is_cm_special(cmd[pos])) {
             // Comprised of command-special characters but is not a valid operator.
             // (note: it's sufficient to check just the first char due to the tokenizer
@@ -159,11 +176,19 @@ normal:
             // Skip the file name
             read += advance_whitespace(cmd + pos + read);
             read += next_token(cmd + pos + read);
-        } else if (is_operator("|", cmd+pos)) {
+        } else if (is_cm_special(cmd[pos])) {
             // argv shall be NULL-terminated
             p_cur->argv[cur_arg] = NULL;
-            p_cur = p_cur->next;
-            cur_arg = 0;
+            if (is_operator("|", cmd+pos)) {
+                p_cur = p_cur->next;
+                cur_arg = 0;
+            } else if (is_operator("||", cmd+pos) || is_operator("&&", cmd+pos) ||
+                        is_operator(";", cmd+pos)) {
+                s_cur = s_cur->next;
+                p_cur = s_cur->p_head;
+                cur_arg = 0;
+            }
+
             p_cur->argv = (char **)malloc((p_cur->_argc + 1) * sizeof (char *));
             if (!p_cur->argv) {
                 res.err = err_oom;

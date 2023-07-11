@@ -13,6 +13,7 @@
 #include "parse_command.h"
 #include "run_command.h"
 #include "errors.h"
+#include "exit_status.h"
 
 
 /**
@@ -152,56 +153,8 @@ struct parse_result read_and_parse_command_line(char **to_free) {
 }
 
 
-/**
- * Returns `true` if `pc` was a special action, thus, no need to perform anything else.
- */
-bool handle_special(const struct piped_commands *const pc) {
-    if (pc->next)
-        return false;
-
-    if (!strcmp(pc->argv[0], "exit")) {
-        int exit_code;
-        if (pc->argv[1] && pc->argv[2]) {
-            fprintf(stderr, "exit must get no more than one argument\n");
-            exit_code = EXIT_FAILURE;
-        } else if (pc->argv[1]) {
-            char *inv;
-            exit_code = strtoimax(pc->argv[1], &inv, 0);
-            // Note: overflow/underflow errors are ignored
-            if (*inv) {
-                fprintf(stderr, "The argument to exit must be numeric\n");
-                exit_code = EXIT_FAILURE;
-            }
-        } else {
-            exit_code = EXIT_SUCCESS;
-        }
-
-        exit(exit_code);
-        assert(false);
-        // Would be
-        // return true;
-    } else if (!strcmp(pc->argv[0], "cd")) {
-        // TODO: merge this with another implementation of `cd`
-        if (pc->argv[1] != NULL && pc->argv[2] == NULL) {
-            if (0 > chdir(pc->argv[1])) {
-                perror("Failed to chdir");
-            }
-        } else {
-            fprintf(stderr, "cd must get exatly one argument\n");
-        }
-        return true;
-    }
-    return false;
-}
-
-
-const int exit_status_default = 0;
-#if !WIFEXITED(exit_status_default) || (0 != WEXITSTATUS(exit_status_default))
-#error The value of `exit_status_default` does not satisfy the expected properties
-#endif
-
 int main() {
-    int exit_status = exit_status_default;
+    int exit_status = EXITSTATUS_DEFAULT;
 
     while (1) {
         (void)scanf(" ");  // Skip whitespace between commands
@@ -212,49 +165,9 @@ int main() {
         } else if (p.err) {
             printf(": %s\n", p.err);
         } else {
-            if (handle_special(p.s_head.p_head))
-                goto handle_out;
-
-            // Children will write their pids into this pipe, I will wait for them.
-            // It would not be safe to just do the correct number of `wait`s, as the
-            // children (after `exec`) may create new siblings, which will turn to my
-            // children, which would lead to a mess.
-            //
-            // Instead, before children `exec`, they write their pid to the stream,
-            // I read it from here and reap them.
-            int children_pids_pipe[2];
-            int err = pipe(children_pids_pipe);
-            if(err) {
-                fprintf(stderr, "Failed to pipe: %s\n", strerror(errno));
-                goto handle_out;
-            }
-
-            pid_t res = fork();
-            switch (res) {
-                case 0:
-                    // Child
-                    process_piped_commands(p.s_head.p_head, children_pids_pipe[1]);
-                    // Won't return
-                    assert(false);
-                case -1:
-                    fprintf(stderr, "Couldn't fork\n");
-                    goto handle_out;
-            }
-
-            err = close(children_pids_pipe[1]);
-            assert(!err);  // If failed to close, will self-deadlock below
-
-            pid_t child;
-            size_t readb;
-            while (0 != (readb = read(children_pids_pipe[0], &child, sizeof child))) {
-                assert(readb == sizeof child);  // Expect no errors to occur
-                int res = waitpid(child, &exit_status, 0);
-                assert(res > 0);
-            }
-            (void)close(children_pids_pipe[0]);
-
-handle_out:
-            destroy_sequenced_commands(&p.s_head);
+            exit_status = process_sequenced_commands(&p.s_head);
+            // DO NOT USE `p.s_head` here: it was consumed and destroyed by
+            // `process_sequenced_commands`.
         }
 
         // The consumed input string must be freed regardless of parsing success

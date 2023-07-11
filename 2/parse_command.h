@@ -26,13 +26,24 @@ struct piped_commands {
     bool append;
 };
 
+enum sequencing_type {
+    SKIP_SUCCESS,
+    SKIP_FAILURE,
+    UNCONDITIONAL
+};
+
 /**
  * A linked list of groups of piped commands combined in a conditional sequence.
  * For the last command group, `.next` is `NULL`.
  */
 struct sequenced_commands {
     struct piped_commands *p_head;
-    //enum sequencing_type type;
+    /**
+     * Specifies the condition of running the next block
+     * of commands depending on the return value of the
+     * current one.
+     */
+    enum sequencing_type run_next;
     struct sequenced_commands *next;
 };
 

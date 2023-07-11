@@ -12,6 +12,7 @@
 
 #include "parse_command.h"
 #include "run_command.h"
+#include "exit_status.h"
 
 __attribute__((noreturn)) void die(const char *fmt, ...) {
     va_list args;
@@ -112,4 +113,114 @@ __attribute__((noreturn)) void process_piped_commands(const struct piped_command
     }
     execvp(pc->argv[0], pc->argv);
     die("Failed to exec %s: %s\n", pc->argv[0], strerror(errno));
+}
+
+/**
+ * Returns `true` if `pc` was a special action, thus, no need to perform anything else.
+ */
+bool handle_special(const struct piped_commands *const pc) {
+    if (pc->next)
+        return false;
+
+    if (!strcmp(pc->argv[0], "exit")) {
+        int exit_code;
+        if (pc->argv[1] && pc->argv[2]) {
+            fprintf(stderr, "exit must get no more than one argument\n");
+            exit_code = EXIT_FAILURE;
+        } else if (pc->argv[1]) {
+            char *inv;
+            exit_code = strtoimax(pc->argv[1], &inv, 0);
+            // Note: overflow/underflow errors are ignored
+            if (*inv) {
+                fprintf(stderr, "The argument to exit must be numeric\n");
+                exit_code = EXIT_FAILURE;
+            }
+        } else {
+            exit_code = EXIT_SUCCESS;
+        }
+
+        exit(exit_code);
+        assert(false);
+        // Would be
+        // return true;
+    } else if (!strcmp(pc->argv[0], "cd")) {
+        // TODO: merge this with another implementation of `cd`
+        if (pc->argv[1] != NULL && pc->argv[2] == NULL) {
+            if (0 > chdir(pc->argv[1])) {
+                perror("Failed to chdir");
+            }
+        } else {
+            fprintf(stderr, "cd must get exatly one argument\n");
+        }
+        return true;
+    }
+    return false;
+}
+
+
+int process_sequenced_commands(struct sequenced_commands *const sc) {
+    int exit_status = EXITSTATUS_DEFAULT;
+    enum sequencing_type run_next = UNCONDITIONAL;
+
+    struct sequenced_commands *sc_cur = sc;
+    for(; sc_cur; sc_cur = sc_cur->next) {
+        bool success = (WIFEXITED(exit_status) && 0 == WEXITSTATUS(exit_status));
+
+        if ((success && run_next == SKIP_SUCCESS) ||
+                (!success && run_next == SKIP_FAILURE))
+            continue;
+
+        if (handle_special(sc_cur->p_head)) {
+            // `sc_cur->p_head` was a special command (e.g. cd or exit) - we performed
+            // it in `handle_special`. Nothing else to do.
+            continue;
+        }
+
+        run_next = sc_cur->run_next;
+
+        // Children will write their pids into this pipe, I will wait for them.
+        // It would not be safe to just do the correct number of `wait`s, as the
+        // children (after `exec`) may create new siblings, which will turn to my
+        // children, which would lead to a mess.
+        //
+        // Instead, before children `exec`, they write their pid to the stream,
+        // I read it from here and reap them.
+        int children_pids_pipe[2];
+        int err = pipe(children_pids_pipe);
+        if(err) {
+            fprintf(stderr, "Failed to pipe: %s\n", strerror(errno));
+            exit_status = EXITSTATUS_BEDA;
+            goto handle_out;
+        }
+
+        pid_t res = fork();
+        switch (res) {
+            case 0:
+                // Child
+                process_piped_commands(sc_cur->p_head, children_pids_pipe[1]);
+                // Won't return
+                assert(false);
+            case -1:
+                fprintf(stderr, "Couldn't fork\n");
+                exit_status = EXITSTATUS_BEDA;
+                goto handle_out;
+        }
+
+        err = close(children_pids_pipe[1]);
+        assert(!err);  // If failed to close, will self-deadlock below
+
+        pid_t child;
+        size_t readb;
+        while (0 != (readb = read(children_pids_pipe[0], &child, sizeof child))) {
+            assert(readb == sizeof child);  // Expect no errors to occur
+            int res = waitpid(child, &exit_status, 0);
+            assert(res > 0);
+        }
+        (void)close(children_pids_pipe[0]);
+    }
+
+handle_out:
+    destroy_sequenced_commands(sc);
+
+    return exit_status;
 }
