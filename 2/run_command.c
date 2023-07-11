@@ -38,14 +38,16 @@ pid_t sibling_fork() {
  *
  * `write_my_pid_fd` must be a writable file descriptor, where the pids of the
  * current process and all created siblings will be written (as a binary sequence of `pid_t`
- * values, no padding).
+ * values, no padding). Giving a value less than zero disables this feature.
  */
 __attribute__((noreturn)) void process_piped_commands(const struct piped_commands *const pc,
                                                       int write_my_pid_fd) {
     // Let the big brother know I should be reaped.
-    pid_t self = getpid();
-    size_t written = write(write_my_pid_fd, &self, sizeof self);
-    assert(written == sizeof self);
+    if (write_my_pid_fd >= 0) {
+        pid_t self = getpid();
+        size_t written = write(write_my_pid_fd, &self, sizeof self);
+        assert(written == sizeof self);
+    }
 
     if(pc->next) {
         int fildes[2];
@@ -66,7 +68,7 @@ __attribute__((noreturn)) void process_piped_commands(const struct piped_command
             assert(false);
         } else {
             // Parent
-            (void)close(write_my_pid_fd);
+            (void)close(write_my_pid_fd);  // Descriptor may be invalid but I don't care
             dup2(fildes[1], STDOUT_FILENO);
             close(fildes[0]);
             close(fildes[1]);
@@ -158,12 +160,15 @@ bool handle_special(const struct piped_commands *const pc) {
 }
 
 
+void reap_daemonized_kids();
+
+
 int process_sequenced_commands(struct sequenced_commands *const sc) {
     int exit_status = EXITSTATUS_DEFAULT;
     enum sequencing_type run_next = UNCONDITIONAL;
 
     struct sequenced_commands *sc_cur = sc;
-    for(; sc_cur; sc_cur = sc_cur->next) {
+    for(; sc_cur; run_next = sc_cur->run_next, sc_cur = sc_cur->next) {
         bool success = (WIFEXITED(exit_status) && 0 == WEXITSTATUS(exit_status));
 
         if ((success && run_next == SKIP_SUCCESS) ||
@@ -176,8 +181,6 @@ int process_sequenced_commands(struct sequenced_commands *const sc) {
             continue;
         }
 
-        run_next = sc_cur->run_next;
-
         // Children will write their pids into this pipe, I will wait for them.
         // It would not be safe to just do the correct number of `wait`s, as the
         // children (after `exec`) may create new siblings, which will turn to my
@@ -186,11 +189,15 @@ int process_sequenced_commands(struct sequenced_commands *const sc) {
         // Instead, before children `exec`, they write their pid to the stream,
         // I read it from here and reap them.
         int children_pids_pipe[2];
-        int err = pipe(children_pids_pipe);
-        if(err) {
-            fprintf(stderr, "Failed to pipe: %s\n", strerror(errno));
-            exit_status = EXITSTATUS_BEDA;
-            goto handle_out;
+        if (run_next == NOWAIT) {
+            children_pids_pipe[0] = children_pids_pipe[1] = -1;
+        } else {
+            int err = pipe(children_pids_pipe);
+            if(err) {
+                fprintf(stderr, "Failed to pipe: %s\n", strerror(errno));
+                exit_status = EXITSTATUS_BEDA;
+                goto handle_out;
+            }
         }
 
         pid_t res = fork();
@@ -206,21 +213,29 @@ int process_sequenced_commands(struct sequenced_commands *const sc) {
                 goto handle_out;
         }
 
-        err = close(children_pids_pipe[1]);
-        assert(!err);  // If failed to close, will self-deadlock below
+        if (run_next != NOWAIT) {
+            int err = close(children_pids_pipe[1]);
+            assert(!err);  // If failed to close, will self-deadlock below
 
-        pid_t child;
-        size_t readb;
-        while (0 != (readb = read(children_pids_pipe[0], &child, sizeof child))) {
-            assert(readb == sizeof child);  // Expect no errors to occur
-            int res = waitpid(child, &exit_status, 0);
-            assert(res > 0);
+            pid_t child;
+            size_t readb;
+            while (0 != (readb = read(children_pids_pipe[0], &child, sizeof child))) {
+                assert(readb == sizeof child);  // Expect no errors to occur
+                int res = waitpid(child, &exit_status, 0);
+                assert(res > 0);
+            }
+            (void)close(children_pids_pipe[0]);
         }
-        (void)close(children_pids_pipe[0]);
     }
 
 handle_out:
     destroy_sequenced_commands(sc);
 
+    reap_daemonized_kids();
+
     return exit_status;
+}
+
+void reap_daemonized_kids() {
+    while (0 < waitpid(0, NULL, WNOHANG));
 }

@@ -67,9 +67,10 @@ normal:
     // We are about to make three passes:
     // 1. During the first pass we will allocate the proper tree of `sequenced_commands`
     //    and `piped_commands` and count the number of command-line arguments each command
-    //    will have (but not assign them yet).
+    //    will have (but not assign them yet). Most parse errors are detected at this pass.
     // 2. During the second pass we will allocate and assign the command-line arguments
     //    for the commands. The arguments pointers will point inside the given `cmd`.
+    //    The "argless command" error is detected at this pass.
     // 3. During the third pass we will ensure all the specified command-line arguments are
     //    NULL-terminated (by setting some chars of `cmd` to '\0').
     //
@@ -119,14 +120,15 @@ normal:
             }
             p_cur = p_cur->next;
         } else if (is_operator("||", cmd+pos) || is_operator("&&", cmd+pos) ||
-                    is_operator(";", cmd+pos)) {
+                    is_operator(";", cmd+pos) || is_operator("&", cmd+pos)) {
             s_cur->next = calloc(1, sizeof (*s_cur->next));
             if (!s_cur->next) {
                 res.err = err_oom;
                 goto err_out;
             }
             if (cmd[pos] == '|') s_cur->run_next = SKIP_SUCCESS;
-            else if (cmd[pos] == '&') s_cur->run_next = SKIP_FAILURE;
+            else if (cmd[pos+1] == '&') s_cur->run_next = SKIP_FAILURE;
+            else if (cmd[pos] == '&') s_cur->run_next = NOWAIT;
             else s_cur->run_next = UNCONDITIONAL;
             s_cur = s_cur->next;
             s_cur->p_head = new_pc();
@@ -149,11 +151,6 @@ normal:
         pos += read;
     }
 
-    if (!p_cur->_argc) {
-        res.err = err_argless_command;
-        goto err_out;
-    }
-
     pos = 0;
     s_cur = &res.s_head;
     p_cur = s_cur->p_head;
@@ -163,6 +160,7 @@ normal:
         res.err = err_oom;
         goto err_out;
     }
+    enum sequencing_type last_sequencing = UNCONDITIONAL;
     while (1) {  // Second pass: allocate and fill in `argv`s
         pos += advance_whitespace(cmd + pos);
 
@@ -177,13 +175,20 @@ normal:
             read += advance_whitespace(cmd + pos + read);
             read += next_token(cmd + pos + read);
         } else if (is_cm_special(cmd[pos])) {
+            if (!p_cur->_argc) {
+                res.err = err_argless_command;
+                goto err_out;
+            }
+
             // argv shall be NULL-terminated
             p_cur->argv[cur_arg] = NULL;
+
             if (is_operator("|", cmd+pos)) {
                 p_cur = p_cur->next;
                 cur_arg = 0;
             } else if (is_operator("||", cmd+pos) || is_operator("&&", cmd+pos) ||
-                        is_operator(";", cmd+pos)) {
+                        is_operator(";", cmd+pos) || is_operator("&", cmd+pos)) {
+                last_sequencing = s_cur->run_next;
                 s_cur = s_cur->next;
                 p_cur = s_cur->p_head;
                 cur_arg = 0;
@@ -202,6 +207,38 @@ normal:
     }
     // Last command's argv shall be NULL-terminated too!
     p_cur->argv[cur_arg] = NULL;
+
+    if (!p_cur->_argc) {
+        // If the last command does not have any arguments, this may be intended.
+        // It shall be allowed if the command ends with either a ';' or an '&'.
+        // Thus, `p_cur` must be the only `piped_commands` in the current
+        // `sequenced_commands`, and the previous `sequenced_commands` shall have
+        // an appropriate `.run_next` (it was saved to `last_sequencing`).
+        if ((last_sequencing == UNCONDITIONAL || last_sequencing == NOWAIT) &&
+                !p_cur->outfile &&  /* No outfile should've been sepcified (e.g. 'echo 1; >f')  */
+                s_cur->p_head == p_cur) {
+            // The input is valid. To make the execution correct, turn `p_cur` into a stub command
+            free(p_cur->argv);
+            p_cur->argv = malloc(2 * sizeof (char *));
+            if (!p_cur->argv) {
+                res.err = err_oom;
+                goto err_out;
+            }
+            p_cur->_argc = 1;
+            p_cur->argv[0] = "true";  // Stub command
+            p_cur->argv[1] = NULL;
+        } else {
+            // The input is invalid
+            res.err = err_argless_command;
+            goto err_out;
+        }
+    }
+    if ((last_sequencing != UNCONDITIONAL && last_sequencing != NOWAIT) ||
+            (s_cur->p_head != p_cur)) {
+        if (!p_cur->_argc) {
+            res.err = err_argless_command;
+        }
+    }
 
     int terminated_times = 0;
     pos = 0;

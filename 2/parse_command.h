@@ -29,7 +29,8 @@ struct piped_commands {
 enum sequencing_type {
     SKIP_SUCCESS,
     SKIP_FAILURE,
-    UNCONDITIONAL
+    UNCONDITIONAL,
+    NOWAIT
 };
 
 /**
