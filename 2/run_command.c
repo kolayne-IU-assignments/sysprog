@@ -6,10 +6,9 @@
 #include <string.h>
 #include <assert.h>
 #include <stdarg.h>
-#include <linux/sched.h>
-#include <sys/syscall.h>
 #include <inttypes.h>
 
+#include "gerold_missing_headers.h"
 #include "parse_command.h"
 #include "run_command.h"
 #include "exit_status.h"
