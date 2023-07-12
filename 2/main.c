@@ -158,6 +158,15 @@ int main() {
 
     while (1) {
         (void)scanf(" ");  // Skip whitespace between commands
+        if (feof(stdin)) {
+            // In old enough libc the `scanf(" ")` is unable
+            // do detect EOF which causes counter-intuitive behavior
+            // in further attempts to scan input. Thus this separate
+            // check: if the input has finished while attempting to
+            // skip whitespace, break outright.
+            break;
+        }
+
         char *to_free;
         struct parse_result p = read_and_parse_command_line(&to_free);
         if (p.err == err_input_is_over) {
