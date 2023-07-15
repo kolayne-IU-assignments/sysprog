@@ -173,14 +173,13 @@ int main() {
             break;
         } else if (p.err) {
             printf(": %s\n", p.err);
+            free(to_free);  // Shall be freed even when parsing is unsuccessful
         } else {
-            exit_status = process_sequenced_commands(&p.s_head);
+            exit_status = process_sequenced_commands(&p.s_head, to_free);
             // DO NOT USE `p.s_head` here: it was consumed and destroyed by
             // `process_sequenced_commands`.
+            // Same for `to_free`.
         }
-
-        // The consumed input string must be freed regardless of parsing success
-        free(to_free);
     }
 
     if (WIFEXITED(exit_status))

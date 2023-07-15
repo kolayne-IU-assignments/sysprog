@@ -119,7 +119,8 @@ __attribute__((noreturn)) void process_piped_commands(const struct piped_command
 /**
  * Returns `true` if `pc` was a special action, thus, no need to perform anything else.
  */
-bool handle_special(const struct piped_commands *const pc) {
+bool handle_special(const struct piped_commands *const pc, struct sequenced_commands *const terminate,
+        char *const free_if_terminate) {
     if (pc->next)
         return false;
 
@@ -140,6 +141,8 @@ bool handle_special(const struct piped_commands *const pc) {
             exit_code = EXIT_SUCCESS;
         }
 
+        destroy_sequenced_commands(terminate);
+        free(free_if_terminate);
         exit(exit_code);
         assert(false);
         // Would be
@@ -162,7 +165,7 @@ bool handle_special(const struct piped_commands *const pc) {
 void reap_daemonized_kids();
 
 
-int process_sequenced_commands(struct sequenced_commands *const sc) {
+int process_sequenced_commands(struct sequenced_commands *const sc, char *const to_free) {
     int exit_status = EXITSTATUS_DEFAULT;
     enum sequencing_type run_next = UNCONDITIONAL;
 
@@ -174,7 +177,7 @@ int process_sequenced_commands(struct sequenced_commands *const sc) {
                 (!success && run_next == SKIP_FAILURE))
             continue;
 
-        if (handle_special(sc_cur->p_head)) {
+        if (handle_special(sc_cur->p_head, sc, to_free)) {
             // `sc_cur->p_head` was a special command (e.g. cd or exit) - we performed
             // it in `handle_special`. Nothing else to do.
             continue;
@@ -229,6 +232,7 @@ int process_sequenced_commands(struct sequenced_commands *const sc) {
 
 handle_out:
     destroy_sequenced_commands(sc);
+    free(to_free);
 
     reap_daemonized_kids();
 

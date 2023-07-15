@@ -4,5 +4,5 @@
 
 #include "parse_command.h"
 
-int process_sequenced_commands(struct sequenced_commands *sc);
+int process_sequenced_commands(struct sequenced_commands *sc, char *to_free);
 void process_piped_commands(const struct piped_commands *pc, int write_my_pid_fd);
