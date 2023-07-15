@@ -18,7 +18,7 @@ void destroy_piped_commands(struct piped_commands *pc) {
 void destroy_sequenced_commands(struct sequenced_commands *sc) {
     if (sc->next)
         destroy_sequenced_commands(sc->next);
-    if (sc->p_head)  // Should always be true
+    if (sc->p_head)
         destroy_piped_commands(sc->p_head);
     free(sc->p_head);
     free(sc->next);
