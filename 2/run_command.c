@@ -18,7 +18,7 @@ __attribute__((noreturn)) void die(const char *fmt, ...) {
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
     va_end(args);
-    exit(EXIT_FAILURE);
+    _exit(EXIT_FAILURE);
 }
 
 pid_t sibling_fork() {
@@ -91,7 +91,7 @@ __attribute__((noreturn)) void process_piped_commands(const struct piped_command
                 die("Failed to chdir to %s: %s\n", pc->argv[1], strerror(errno));
             }
             // cd: nothing else to do
-            exit(EXIT_SUCCESS);
+            _exit(EXIT_SUCCESS);
         } else {
             die("cd must get exactly one argument\n");
         }
@@ -106,10 +106,10 @@ __attribute__((noreturn)) void process_piped_commands(const struct piped_command
             if (*inv) {
                 die("The argument to exit must be numeric\n");
             } else {
-                exit(code);
+                _exit(code);
             }
         } else {
-            exit(EXIT_SUCCESS);
+            _exit(EXIT_SUCCESS);
         }
     }
     execvp(pc->argv[0], pc->argv);
