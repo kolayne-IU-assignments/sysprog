@@ -14,10 +14,16 @@ static unsigned char circular_queue_realloc(struct circular_queue *queue, size_t
         return CQ_ERR_NO_MEM;
 
     if (queue->head <= queue->tail) {
-        memcpy(new + queue->head, queue->data + queue->head, (queue->tail - queue->head) * sizeof (void *));
+        memcpy(new, queue->data + queue->head, (queue->tail - queue->head) * sizeof (void *));
+        queue->tail = queue->tail - queue->head;
+        queue->head = 0;
     } else {
-        memcpy(new + queue->head, queue->data + queue->head, (queue->dcapacity - queue->head) * sizeof (void *));
-        memcpy(new, queue->data, queue->tail * sizeof (void *));
+        size_t first = (queue->dcapacity - queue->head);
+        size_t second = queue->tail;
+        memcpy(new, queue->data + queue->head, first * sizeof (void *));
+        memcpy(new + first, queue->data, second * sizeof (void *));
+        queue->tail = first + second;
+        queue->head = 0;
     }
     free(queue->data);
     queue->data = new;

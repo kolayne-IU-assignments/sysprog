@@ -60,6 +60,8 @@ struct thread_pool {
     pthread_t *threads;
 
     pthread_mutex_t queue_lock;
+    /// Signalled (with taken `queue_lock`) when new tasks are pushed into the queue
+    pthread_cond_t queue_push_cond;
     /// Tasks queue. Protected with `queue_lock`
     struct circular_queue queue;
 
@@ -81,6 +83,79 @@ static inline bool atomic_cex_state(struct thread_task *task, enum task_state ol
     if (succ)  /* If successfully exchanged, wake up waiters! */
         (void)futexp_wake(&task->state, INT_MAX);
     return succ;
+}
+
+static void deferred_mutex_unlock(void *mutexv) {
+    pthread_mutex_t *mutex = (pthread_mutex_t *)mutexv;
+    int err = pthread_mutex_unlock(mutex);
+    assert(!err);
+}
+
+static void *thread_pool_worker(void *poolv) {
+    struct thread_pool *pool = (struct thread_pool *)poolv;
+
+    while (1) {  /* Loop forever, until my master `pthread_cancel`s me */
+        int err = pthread_mutex_lock(&pool->queue_lock);
+        assert(!err);
+
+        /*
+         * `pthread_cleanup_push`/`pthread_cleanup_pop` are fucking macros, they enclose the code between
+         * them in curly braces. Thus, can't declare variables between them if want to use them outside
+         * the block.
+         * So, here goes the `task` declaration.
+         */
+        struct thread_task *task;
+
+        /*
+         * Instead of manually unlocking the mutex, I will use the thread-cancellation clean-up
+         * handlers stack. It allows for nice and convenient worker cancellation.
+         *
+         * Note that there is no race condition with `pthread_cancel` (e.g. between `pthread_mutex_lock`
+         * above and `pthread_cleanup_push` right below) because `thread_pool_delete` ensures all the
+         * workers are free and the queue is empty before attempting to cancel workers (and attempting
+         * to add new tasks while deleting a thread pool is UB).
+         */
+        pthread_cleanup_push(deferred_mutex_unlock, &pool->queue_lock);
+
+        /*
+         * Note: no need to synchronize on `pool->free_count`, as it is protected with `pool->queue_lock`
+         */
+        ++pool->free_count;
+        while (circular_queue_size(&pool->queue) == 0) {
+            err = pthread_cond_wait(&pool->queue_push_cond, &pool->queue_lock);
+            assert(!err);
+        }
+        --pool->free_count;
+
+        task = (struct thread_task *)circular_queue_pop(&pool->queue);
+        pthread_cleanup_pop(1);  /* Unlock the mutex */
+
+        /*
+         * Warning: the order of condition checks is important. Task can turn from PUSHED to
+         * PUSHED_GHOST, but not vice versa.
+         */
+        bool ok = atomic_cex_state(task, TASK_STATE_PUSHED, TASK_STATE_RUNNING) ||
+            atomic_cex_state(task, TASK_STATE_PUSHED_GHOST, TASK_STATE_RUNNING_GHOST);
+        assert(ok);  /* Task popped from queue must have been pushed */
+
+        task->ret = task->function(task->arg);
+
+        /*
+         * Warning: the checks order is important: task can turn from RUNNING to RUNNING_GHOST,
+         * but not vice versa.
+         */
+        if (atomic_cex_state(task, TASK_STATE_RUNNING, TASK_STATE_FINISHED)) {
+            /* Success. Nothing else to do. */
+        } else if (atomic_cex_state(task, TASK_STATE_RUNNING_GHOST, TASK_STATE_FINISHED)) {
+            /* Detached task has finished. Destroy it. */
+            err = thread_task_delete(task);
+            assert(!err);  /* Error indicates that a deatched task was repushed (which is UB) */
+        } else {
+            assert(false);  /* A task that I was performing is not in a running state */
+        }
+    }
+
+    assert(false);  // Unreachable
 }
 
 int
@@ -106,6 +181,8 @@ thread_pool_new(int max_thread_count, struct thread_pool **poolp)
 
     int err = pthread_mutex_init(&pool->queue_lock, NULL);
     assert(!err);
+    err = pthread_cond_init(&pool->queue_push_cond, NULL);
+    assert(!err);
     err = circular_queue_init(&pool->queue);
     assert(!err);  // OOM only
 
@@ -126,10 +203,7 @@ thread_pool_delete(struct thread_pool *pool)
     if (fail)
         return TPOOL_ERR_HAS_TASKS;
 
-    circular_queue_destroy(&pool->queue);
-    err = pthread_mutex_destroy(&pool->queue_lock);
-    assert(!err);
-
+    /* Should join all workers before destroying any resources it is using */
     for (size_t i = 0; i < pool->spawned_count; ++i) {
         err = pthread_cancel(pool->threads[i]);
         assert(!err);
@@ -138,8 +212,13 @@ thread_pool_delete(struct thread_pool *pool)
         err = pthread_join(pool->threads[i], NULL);
         assert(!err);
     }
-
     free(pool->threads);
+
+    circular_queue_destroy(&pool->queue);
+    err = pthread_cond_destroy(&pool->queue_push_cond);
+    assert(!err);
+    err = pthread_mutex_destroy(&pool->queue_lock);
+    assert(!err);
 
     free(pool);
 
@@ -179,10 +258,14 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
         }
 
         if (pool->free_count == 0 && pool->spawned_count < pool->tmax) {
-            // TODO: spawn new child
+            err = pthread_create(&pool->threads[pool->spawned_count++], NULL,
+                    thread_pool_worker, (void *)pool);
+            assert(!err);  /* Unable to spawn new thread */
         }
     }
 
+    err = pthread_cond_signal(&pool->queue_push_cond);
+    assert(!err);
     err = pthread_mutex_unlock(&pool->queue_lock);
     assert(!err);
     return ret;
