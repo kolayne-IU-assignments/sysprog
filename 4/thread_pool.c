@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <assert.h>
 #include <limits.h>
+#include <float.h>
+#include <errno.h>
+#include <math.h>
 
 #include "circular_queue.h"
 #include "futex.h"
@@ -336,10 +339,18 @@ thread_task_is_running(const struct thread_task *task)
 
 int
 thread_task_join(struct thread_task *task, void **result) {
+    /*
+     * Relaxed memory order is sufficient here. If the task is being pushed in parallel
+     * and it's already pushed but I receive an old state, the behavior is as if I
+     * was scheduled to run before the task got pushed;
+     * If the task is not yet pushed but I receive the pushed state, there is no problem
+     * in subscribing to the state early.
+     */
     if (__atomic_load_n(&task->state, __ATOMIC_RELAXED) == TASK_STATE_CREATED)
         return TPOOL_ERR_TASK_NOT_PUSHED;
 
-    futexp_wait_for(&task->state, TASK_STATE_FINISHED);
+    int err = futexp_wait_for(&task->state, TASK_STATE_FINISHED);
+    assert(!err);
 
     /* No need to synchronize after the task has finished */
     *result = task->ret;
@@ -352,11 +363,34 @@ thread_task_join(struct thread_task *task, void **result) {
 int
 thread_task_timed_join(struct thread_task *task, double timeout, void **result)
 {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)task;
-    (void)timeout;
-    (void)result;
-    return TPOOL_ERR_NOT_IMPLEMENTED;
+    /* Relaxed memory order is sufficient here. See `thread_task_join` */
+    if (__atomic_load_n(&task->state, __ATOMIC_RELAXED) == TASK_STATE_CREATED)
+        return TPOOL_ERR_TASK_NOT_PUSHED;
+
+    struct timespec ttm = {};
+    struct timespec *ttmp = &ttm;
+#ifdef INFINITY
+    if (timeout == INFINITY)
+        ttmp = NULL;
+    else
+#endif
+    if (timeout == DBL_MAX)
+        ttmp = NULL;
+    else if (timeout > 0) {
+        ttm.tv_sec = (time_t)timeout;
+        ttm.tv_nsec = (long)((timeout - ttm.tv_sec) * 1e9);
+    }
+
+    int err = futexp_timed_wait_for(&task->state, TASK_STATE_FINISHED, ttmp);
+    if (err != 0) {
+        assert(errno == ETIMEDOUT);
+        return TPOOL_ERR_TIMEOUT;
+    }
+
+    /* No need to synchronize once the task has finished */
+    *result = task->ret;
+
+    return 0;
 }
 
 #endif
