@@ -366,9 +366,19 @@ thread_task_timed_join(struct thread_task *task, double timeout, void **result)
 int
 thread_task_detach(struct thread_task *task)
 {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)task;
-    return TPOOL_ERR_NOT_IMPLEMENTED;
+    /* Warning: the checks order is important */
+    if (__atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == TASK_STATE_CREATED) {
+        return TPOOL_ERR_TASK_NOT_PUSHED;
+    } else if (atomic_cex_state(task, TASK_STATE_PUSHED, TASK_STATE_PUSHED_GHOST)) {
+        return 0;
+    } else if (atomic_cex_state(task, TASK_STATE_RUNNING, TASK_STATE_RUNNING_GHOST)) {
+        return 0;
+    } else if (__atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == TASK_STATE_FINISHED) {
+        thread_task_delete(task);
+        return 0;
+    } else {
+        assert(false);  // Other states/transitions are impossible
+    }
 }
 
 #endif
