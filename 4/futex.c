@@ -47,13 +47,8 @@ long futexp_timed_wait_for(uint32_t *uaddr, uint32_t wait_for, const struct time
     }
 
     while (1) {
-        /*
-         * Note: the barrier I desire is LoadLoad+StoreLoad:
-         * If the current value of futex is already the desired one, I want all the related work to
-         * (by the setter) to have been finished.
-         * As there's no such barrier, have no other option but to totally order.
-         */
-        uint32_t cur = __atomic_load_n(uaddr, __ATOMIC_SEQ_CST);
+        /* The value must have been assigned with memory order release */
+        uint32_t cur = __atomic_load_n(uaddr, __ATOMIC_ACQUIRE);
         if (cur == wait_for)
             return 0;
 

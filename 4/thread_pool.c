@@ -47,7 +47,10 @@ struct thread_task {
     /**
      * Current task state. Can be used as a futex.
      * On every change (except for when intialized via `thread_task_new`), `FUTEX_WAKE_PRIVATE`
-     * is performed for `INT_MAX` waiters.
+     * shall be performed for `INT_MAX` waiters.
+     *
+     * Must be assigned and fetched using `__atomic_*` functions with acquire and release memory
+     * orders, respectively, to ensure consistent state transitions.
      */
     enum task_state state;
 };
@@ -67,8 +70,14 @@ struct thread_pool {
 };
 
 static inline bool atomic_cex_state(struct thread_task *task, enum task_state old, enum task_state new) {
-    // TODO: fix all SEQ_CSTs
-    bool succ = __atomic_compare_exchange_n(&task->state, &old, new, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
+    /*
+     * Success memory order is acquire+release because I want the task to have fully transitioned to
+     * the `old` state before I can see it and I want the state to change to `new` before any further
+     * actions are taken.
+     * Failure memory order is relaxed because the unexpected old state is not reported and no actions
+     * are taken based on it.
+     */
+    bool succ = __atomic_compare_exchange_n(&task->state, &old, new, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
     if (succ)  /* If successfully exchanged, wake up waiters! */
         (void)futexp_wake(&task->state, INT_MAX);
     return succ;
@@ -204,8 +213,7 @@ thread_task_new(struct thread_task **taskp, thread_task_f function, void *arg)
 int
 thread_task_delete(struct thread_task *task)
 {
-    /* Want LoadLoad+StoreLoad for all cleanup operations to finish before deletion */
-    enum task_state state = __atomic_load_n(&task->state, __ATOMIC_SEQ_CST);
+    enum task_state state = __atomic_load_n(&task->state, __ATOMIC_ACQUIRE);
     if (state == TASK_STATE_CREATED || state == TASK_STATE_FINISHED) {
         free(task);
         return 0;
@@ -218,13 +226,11 @@ bool
 thread_task_is_finished(const struct thread_task *task)
 {
     /*
-     * If the task has really finished, I want all the cleanup to happen before I report the task
-     * is finished, so the barrier I want is LoadLoad+StoreLoad (everything to finish before this
-     * load).
-     *
-     * As such barrier does not exist, using total order.
+     * When control is returned to the caller, in case of success, the caller expects all
+     * the finishing operations to have completed, so the relaxed memory order is not
+     * sufficient. Note that acquire is enough, as the state is set with release.
      */
-    return __atomic_load_n(&task->state, __ATOMIC_SEQ_CST) == TASK_STATE_FINISHED;
+    return __atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == TASK_STATE_FINISHED;
 }
 
 bool
@@ -236,9 +242,9 @@ thread_task_is_running(const struct thread_task *task)
      * execution (although, perhaps, has already finished by the moment the caller can do anything).
      *
      * Therefore, need to ensure everything happening before the task gets into the running state is
-     * finished, thus need LoadLoad+StoreLoad, but no such barrier, so have to use total order.
+     * finished, thus the memory order.
      */
-    return __atomic_load_n(&task->state, __ATOMIC_SEQ_CST) == TASK_STATE_RUNNING;
+    return __atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == TASK_STATE_RUNNING;
     /*
      * Note that `TASK_STATE_RUNING_GHOST` also corresponds to a running task but ghost tasks must never
      * be addressed - the behavior is undefined.
