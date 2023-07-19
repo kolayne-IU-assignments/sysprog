@@ -97,17 +97,11 @@ static void deferred_mutex_unlock(void *mutexv) {
 static void *thread_pool_worker(void *poolv) {
     struct thread_pool *pool = (struct thread_pool *)poolv;
 
+    struct thread_task *task = NULL;
+
     while (1) {  /* Loop forever, until my master `pthread_cancel`s me */
         int err = pthread_mutex_lock(&pool->queue_lock);
         assert(!err);
-
-        /*
-         * `pthread_cleanup_push`/`pthread_cleanup_pop` are fucking macros, they enclose the code between
-         * them in curly braces. Thus, can't declare variables between them if want to use them outside
-         * the block.
-         * So, here goes the `task` declaration.
-         */
-        struct thread_task *task;
 
         /*
          * Instead of manually unlocking the mutex, I will use the thread-cancellation clean-up
@@ -115,12 +109,35 @@ static void *thread_pool_worker(void *poolv) {
          *
          * Note that there is no race condition with `pthread_cancel` (e.g. between `pthread_mutex_lock`
          * above and `pthread_cleanup_push` right below) because `thread_pool_delete` ensures all the
-         * workers are free and the queue is empty before attempting to cancel workers (and attempting
-         * to add new tasks while deleting a thread pool is UB).
+         * workers are free before attempting to cancel them (which means they are already at the
+         * `pthread_cond_wait` stage below).
          */
         pthread_cleanup_push(deferred_mutex_unlock, &pool->queue_lock);
 
         /*
+         * Declare the previous task as finished only after taking the mutex. Otherwise,
+         * there's a race condition between when I report I'm done with the task
+         * and when I report I'm a free worker (it sometimes prevents the pool
+         * from being deleted).
+         */
+        if (task) {
+            /*
+             * Warning: the checks order is important: task can turn from RUNNING to RUNNING_GHOST,
+             * but not vice versa.
+             */
+            if (atomic_cex_state(task, TASK_STATE_RUNNING, TASK_STATE_FINISHED)) {
+                /* Success. Nothing else to do. */
+            } else if (atomic_cex_state(task, TASK_STATE_RUNNING_GHOST, TASK_STATE_FINISHED)) {
+                /* A detached task has finished. Destroy it. */
+                err = thread_task_delete(task);
+                assert(!err);  /* Error indicates that a deatched task was repushed (which is UB) */
+            } else {
+                assert(false);  /* A task that I was performing is not in a running state */
+            }
+        }
+
+        /*
+         * Now that I'm done with the previous task, I am free.
          * Note: no need to synchronize on `pool->free_count`, as it is protected with `pool->queue_lock`
          */
         ++pool->free_count;
@@ -141,21 +158,8 @@ static void *thread_pool_worker(void *poolv) {
             atomic_cex_state(task, TASK_STATE_PUSHED_GHOST, TASK_STATE_RUNNING_GHOST);
         assert(ok);  /* Task popped from queue must have been pushed */
 
+        /* Run the task on this iteration of the loop, but declare as finished on the next one */
         task->ret = task->function(task->arg);
-
-        /*
-         * Warning: the checks order is important: task can turn from RUNNING to RUNNING_GHOST,
-         * but not vice versa.
-         */
-        if (atomic_cex_state(task, TASK_STATE_RUNNING, TASK_STATE_FINISHED)) {
-            /* Success. Nothing else to do. */
-        } else if (atomic_cex_state(task, TASK_STATE_RUNNING_GHOST, TASK_STATE_FINISHED)) {
-            /* Detached task has finished. Destroy it. */
-            err = thread_task_delete(task);
-            assert(!err);  /* Error indicates that a deatched task was repushed (which is UB) */
-        } else {
-            assert(false);  /* A task that I was performing is not in a running state */
-        }
     }
 
     assert(false);  // Unreachable
