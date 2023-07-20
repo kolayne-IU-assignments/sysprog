@@ -99,18 +99,20 @@ static void *thread_pool_worker(void *poolv) {
 
     struct thread_task *task = NULL;
 
-    while (1) {  /* Loop forever, until my master `pthread_cancel`s me */
+    /*
+     * The worker will run forever until canceled with `pthread_cancel`.
+     * Note that the cancelation signal can only be sent by `thread_pool_delete` after it acquires the
+     * `pool->queue_lock` and makes sure all spawned workers are free. That can only be true when the worker
+     * is waiting for the next task in the `pthread_cond_wait` below, and that's the only place where the
+     * cancelation might be attempted (regardless of the thread's cancelation type (asynchronous/deferred)).
+     */
+    while (1) {
         int err = pthread_mutex_lock(&pool->queue_lock);
         assert(!err);
 
         /*
-         * Instead of manually unlocking the mutex, I will use the thread-cancellation clean-up
-         * handlers stack. It allows for nice and convenient worker cancellation.
-         *
-         * Note that there is no race condition with `pthread_cancel` (e.g. between `pthread_mutex_lock`
-         * above and `pthread_cleanup_push` right below) because `thread_pool_delete` ensures all the
-         * workers are free before attempting to cancel them (which means they are already at the
-         * `pthread_cond_wait` stage below).
+         * Lock/unlock the mutex via a thread-cancelation clean-up handler - to maintain a proper lock state
+         * when the worker is canceled on pool deletion.
          */
         pthread_cleanup_push(deferred_mutex_unlock, &pool->queue_lock);
 
