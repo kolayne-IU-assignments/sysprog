@@ -19,15 +19,16 @@
  * TASK_STATE_PUSHED        -> TASK_STATE_RUNNING,
  * TASK_STATE_PUSHED_GHOST  -> TASK_STATE_RUNNING_GHOST,
  * TASK_STATE_RUNNING       -> TASK_STATE_RUNNING_GHOST,
- * TASK_STATE_RUNNING       -> TASK_STATE_FINISHED,
- * TASK_STATE_RUNNING_GHOST -> TASK_STATE_FINISHED.
+ * TASK_STATE_RUNNING       -> TASK_STATE_COMPLETED,
+ * TASK_STATE_RUNNING_GHOST -> TASK_STATE_COMPLETED (and the task is freed outright),
+ * TASK_STATE_COMPLETED     -> TASK_STATED_JOINED.
  *
  * Note that the directed graph formed by these states and transitions is acyclic, which
  * allows for implementation of some operations as a sequence of atomic operations without
  * locks.
  *
  * Another possible transition is
- * TASK_STATE_FINISHED -> TASK_STATE_PUSHED
+ * TASK_STATE_JOINED -> TASK_STATE_CREATED
  * but it's up to the library's user to ensure that this transition does not happen while
  * any thread pool function is working (except for `thread_pool_push_task`, which is the
  * function to perform this transition).
@@ -39,7 +40,8 @@ enum task_state {
     TASK_STATE_PUSHED_GHOST,
     TASK_STATE_RUNNING,
     TASK_STATE_RUNNING_GHOST,
-    TASK_STATE_FINISHED,
+    TASK_STATE_COMPLETED,
+    TASK_STATE_JOINED,
 };
 
 struct thread_task {
@@ -127,10 +129,10 @@ static void *thread_pool_worker(void *poolv) {
              * Warning: the checks order is important: task can turn from RUNNING to RUNNING_GHOST,
              * but not vice versa.
              */
-            if (atomic_cex_state(task, TASK_STATE_RUNNING, TASK_STATE_FINISHED)) {
+            if (atomic_cex_state(task, TASK_STATE_RUNNING, TASK_STATE_COMPLETED)) {
                 /* Success. Nothing else to do. */
-            } else if (atomic_cex_state(task, TASK_STATE_RUNNING_GHOST, TASK_STATE_FINISHED)) {
-                /* A detached task has finished. Destroy it. */
+            } else if (atomic_cex_state(task, TASK_STATE_RUNNING_GHOST, TASK_STATE_JOINED)) {
+                /* A detached task has finished. Declare it joined and destroy. */
                 err = thread_task_delete(task);
                 assert(!err);  /* Error indicates that a deatched task was repushed (which is UB) */
             } else {
@@ -257,7 +259,7 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
             ret = 0;
             err = circular_queue_push(&pool->queue, task);
             assert(!err);  // OOM only
-        } else if (atomic_cex_state(task, TASK_STATE_FINISHED, TASK_STATE_PUSHED)) {
+        } else if (atomic_cex_state(task, TASK_STATE_JOINED, TASK_STATE_PUSHED)) {
             /* Success. Repushed the task. It's up to the user to ensure that it was joined earlier. */
             ret = 0;
             err = circular_queue_push(&pool->queue, task);
@@ -306,7 +308,7 @@ int
 thread_task_delete(struct thread_task *task)
 {
     enum task_state state = __atomic_load_n(&task->state, __ATOMIC_ACQUIRE);
-    if (state == TASK_STATE_CREATED || state == TASK_STATE_FINISHED) {
+    if (state == TASK_STATE_CREATED || state == TASK_STATE_JOINED) {
         free(task);
         return 0;
     } else {
@@ -322,7 +324,7 @@ thread_task_is_finished(const struct thread_task *task)
      * the finishing operations to have completed, so the relaxed memory order is not
      * sufficient. Note that acquire is enough, as the state is set with release.
      */
-    return __atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == TASK_STATE_FINISHED;
+    return __atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == TASK_STATE_COMPLETED;
 }
 
 bool
@@ -355,8 +357,11 @@ thread_task_join(struct thread_task *task, void **result) {
     if (__atomic_load_n(&task->state, __ATOMIC_RELAXED) == TASK_STATE_CREATED)
         return TPOOL_ERR_TASK_NOT_PUSHED;
 
-    int err = futexp_wait_for(&task->state, TASK_STATE_FINISHED);
+    int err = futexp_wait_for(&task->state, TASK_STATE_COMPLETED);
     assert(!err);
+
+    bool succ = atomic_cex_state(task, TASK_STATE_COMPLETED, TASK_STATE_JOINED);
+    assert(succ);  /* Task must not transition once completed until joined. */
 
     /* No need to synchronize after the task has finished */
     *result = task->ret;
@@ -387,11 +392,14 @@ thread_task_timed_join(struct thread_task *task, double timeout, void **result)
         ttm.tv_nsec = (long)((timeout - ttm.tv_sec) * 1e9);
     }
 
-    int err = futexp_timed_wait_for(&task->state, TASK_STATE_FINISHED, ttmp);
+    int err = futexp_timed_wait_for(&task->state, TASK_STATE_COMPLETED, ttmp);
     if (err != 0) {
         assert(errno == ETIMEDOUT);
         return TPOOL_ERR_TIMEOUT;
     }
+
+    bool succ = atomic_cex_state(task, TASK_STATE_COMPLETED, TASK_STATE_JOINED);
+    assert(succ);  /* Task must not transition once completed until joined. */
 
     /* No need to synchronize once the task has finished */
     *result = task->ret;
@@ -413,7 +421,7 @@ thread_task_detach(struct thread_task *task)
         return 0;
     } else if (atomic_cex_state(task, TASK_STATE_RUNNING, TASK_STATE_RUNNING_GHOST)) {
         return 0;
-    } else if (__atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == TASK_STATE_FINISHED) {
+    } else if (atomic_cex_state(task, TASK_STATE_COMPLETED, TASK_STATE_JOINED)) {
         thread_task_delete(task);
         return 0;
     } else {
