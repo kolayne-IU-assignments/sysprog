@@ -5,6 +5,10 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <poll.h>
+#include <errno.h>
+#include <unistd.h>
+#include <string.h>
 
 static int
 port_from_str(const char *str, uint16_t *port)
@@ -43,17 +47,47 @@ main(int argc, char **argv)
 		return -1;
 	}
 #if NEED_SERVER_FEED
-	/*
-	 * If want +5 points, then do similarly to the client_exe - create 2
-	 * pollfd objects, wait on STDIN_FILENO and on
-	 * chat_server_get_descriptor(), process events, etc.
-	 */
-#else
+	struct pollfd poll_fds[2] = {[0] = {.fd = STDIN_FILENO, .events = POLLIN}};
+
+	struct pollfd *poll_stdin = &poll_fds[0], *poll_server_queue = &poll_fds[1];
+	poll_server_queue->fd = chat_server_get_descriptor(serv);
+#endif
 	/*
 	 * The basic implementation without server messages. Just serving
 	 * clients.
 	 */
 	while (true) {
+#if NEED_SERVER_FEED
+		poll_server_queue->events = chat_events_to_poll_events(chat_server_get_events(serv));
+
+		int rc = poll(poll_fds, 2, -1);
+		if (rc < 0) {
+			printf("poll failed: %d\n", rc);
+			break;
+		}
+
+		if (poll_stdin->revents) {
+			const size_t bufsiz = 1024;
+			char buf[bufsiz];
+			ssize_t got = read(STDIN_FILENO, buf, bufsiz);
+			if (got < 0) {
+				printf("Failed reading from stdin: %s\n", strerror(errno));
+				break;
+			} else if (got == 0) {
+				puts("EOF. Exiting");
+				break;
+			} else {
+				int err = chat_server_feed(serv, buf, got);
+				if (err) {
+					printf("chat_server_feed failed: %d\n", err);
+				}
+			}
+		}
+
+		if (poll_server_queue->revents) {
+			// Let the server handle it
+#endif
+
 		int rc = chat_server_update(serv, -1);
 		if (rc != 0) {
 			printf("Update error: %d\n", rc);
@@ -69,8 +103,11 @@ main(int argc, char **argv)
 #endif
 			chat_message_delete(msg);
 		}
-	}
+
+#if NEED_SERVER_FEED
+		}
 #endif
+	}
 	chat_server_delete(serv);
 	return 0;
 }

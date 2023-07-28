@@ -164,16 +164,52 @@ chat_server_listen(struct chat_server *server, uint16_t port)
 	return 0;
 }
 
+static int broadcast_message(struct chat_server *server, const char *author, size_t author_len, const char *msg, size_t msg_len, const struct chat_peer *except)
+{
+#if !NEED_AUTHOR
+	(void)author;
+	(void)author_len;
+#endif
+
+	for (struct chat_peer *other = server->peers; other; other = other->next) {
+		if (other == except)
+			continue;
+
+		if (!*other->outgoing.read) {
+			++server->pending_output_peers;
+			int err = epoll_ctl(server->epoll_fd, EPOLL_CTL_MOD,
+				other->socket, &(struct epoll_event){
+					.events = EPOLLIN | EPOLLOUT,
+					.data.ptr = other
+				});
+			if (err)
+			    return CHAT_ERR_SYS;
+		}
+#if NEED_AUTHOR
+		pmq_put(&other->outgoing, author, author_len);
+#endif
+		pmq_put(&other->outgoing, msg, msg_len);
+	}
+	return 0;
+}
+
 int
 chat_server_feed(struct chat_server *server, const char *msg, uint32_t msg_size)
 {
 #if NEED_SERVER_FEED
-	/* IMPLEMENT THIS FUNCTION if want +5 points. */
-#endif
+	if (server->socket < 0)
+		return CHAT_ERR_NOT_STARTED;
+
+	static const char server_s[] = "server\n";
+	static const size_t server_s_len = sizeof server_s - 1;
+
+	return broadcast_message(server, server_s, server_s_len, msg, msg_size, NULL);
+#else
 	(void)server;
 	(void)msg;
 	(void)msg_size;
 	return CHAT_ERR_NOT_IMPLEMENTED;
+#endif
 }
 
 int
@@ -266,25 +302,9 @@ chat_server_update(struct chat_server *server, double timeout)
 							pmq_put(&server->received, peer->author, author_len);
 #endif
 							pmq_put(&server->received, msg, len);
-							for (struct chat_peer *other = server->peers; other; other = other->next) {
-								if (other == peer)
-									continue;
-
-								if (!*other->outgoing.read) {
-									++server->pending_output_peers;
-									int err = epoll_ctl(server->epoll_fd, EPOLL_CTL_MOD,
-										other->socket, &(struct epoll_event){
-											.events = EPOLLIN | EPOLLOUT,
-											.data.ptr = other
-										});
-									if (err)
-									    return CHAT_ERR_SYS;
-								}
-#ifdef NEED_AUTHOR
-								pmq_put(&other->outgoing, peer->author, author_len);
-#endif
-								pmq_put(&other->outgoing, msg, len);
-							}
+							int err = broadcast_message(server, peer->author, author_len, msg, len, peer);
+							if (err)
+								return err;
 						}
 					}
 				}
@@ -346,8 +366,6 @@ int
 chat_server_get_descriptor(const struct chat_server *server)
 {
 #if NEED_SERVER_FEED
-	/* IMPLEMENT THIS FUNCTION if want +5 points. */
-
 	/*
 	 * Server has multiple sockets - own and from connected clients. Hence
 	 * you can't return a socket here. But if you are using epoll/kqueue,
@@ -361,6 +379,7 @@ chat_server_get_descriptor(const struct chat_server *server)
 	 * be sure epoll_wait() can return something useful for some of those
 	 * sockets.
 	 */
+	return server->epoll_fd;
 #else
 	(void)server;
 	return -1;
