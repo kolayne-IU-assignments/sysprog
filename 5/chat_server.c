@@ -249,15 +249,21 @@ chat_server_update(struct chat_server *server, double timeout)
 							for (struct chat_peer *other = server->peers; other; other = other->next) {
 								if (other == peer)
 									continue;
+
+								if (!*other->outgoing.read) {
+									++server->pending_output_peers;
+									int err = epoll_ctl(server->epoll_fd, EPOLL_CTL_MOD,
+										other->socket, &(struct epoll_event){
+											.events = EPOLLIN | EPOLLOUT,
+											.data.ptr = other
+										});
+									if (err)
+									    return CHAT_ERR_SYS;
+								}
+#ifdef NEED_AUTHOR
+								pmq_put(&other->outgoing, peer->author, author_len);
+#endif
 								pmq_put(&other->outgoing, msg, len);
-								++server->pending_output_peers;
-								int err = epoll_ctl(server->epoll_fd, EPOLL_CTL_MOD,
-									other->socket, &(struct epoll_event){
-										.events = EPOLLIN | EPOLLOUT,
-										.data.ptr = other
-									});
-								if (err)
-								    return CHAT_ERR_SYS;
 							}
 						}
 					}
