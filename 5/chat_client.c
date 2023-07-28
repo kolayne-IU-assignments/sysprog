@@ -1,17 +1,25 @@
 #include "chat.h"
 #include "chat_client.h"
+#include "partial_message_queue.h"
 
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <errno.h>
+#include <assert.h>
 
 struct chat_client {
-	/** Socket connected to the server. */
+	/** Socket connected to the server */
 	int socket;
-	/** Array of received messages. */
-	/* ... */
-	/** Output buffer. */
-	/* ... */
-	/* PUT HERE OTHER MEMBERS */
+	/** Incoming messages queue */
+	struct partial_message_queue incoming;
+	/** Outgoing messages queue */
+	struct partial_message_queue outgoing;
 };
 
 struct chat_client *
@@ -23,7 +31,8 @@ chat_client_new(const char *name)
 	struct chat_client *client = calloc(1, sizeof(*client));
 	client->socket = -1;
 
-	/* IMPLEMENT THIS FUNCTION */
+	pmq_init(&client->incoming, 16);
+	pmq_init(&client->outgoing, 16);
 
 	return client;
 }
@@ -32,9 +41,10 @@ void
 chat_client_delete(struct chat_client *client)
 {
 	if (client->socket >= 0)
-		close(client->socket);
+		(void)close(client->socket);
 
-	/* IMPLEMENT THIS FUNCTION */
+	pmq_destroy(&client->incoming);
+	pmq_destroy(&client->outgoing);
 
 	free(client);
 }
@@ -42,65 +52,144 @@ chat_client_delete(struct chat_client *client)
 int
 chat_client_connect(struct chat_client *client, const char *addr)
 {
+	if (client->socket > 0)
+		return CHAT_ERR_ALREADY_STARTED;
+
+	char *addr_dup = strdup(addr);
+	assert(addr_dup);
+	char *colon = strchr(addr_dup, ':');
+	assert(colon);
+	*colon = '\0';
+
 	/*
 	 * 1) Use getaddrinfo() to resolve addr to struct sockaddr_in.
 	 * 2) Create a client socket (function socket()).
 	 * 3) Connect it by the found address (function connect()).
 	 */
-	/* IMPLEMENT THIS FUNCTION */
-	(void)client;
-	(void)addr;
 
-	return CHAT_ERR_NOT_IMPLEMENTED;
+	struct addrinfo *result, hints = {.ai_family = AF_INET};
+	int err = getaddrinfo(addr_dup, colon + 1, &hints, &result);
+	if (err != 0) {
+		return CHAT_ERR_NO_ADDR;
+	}
+
+	int sockfd;
+	struct addrinfo *aip;
+	for (aip = result; aip != NULL; aip = aip->ai_next) {
+		sockfd = socket(aip->ai_family, aip->ai_socktype, aip->ai_protocol);
+		if (sockfd < 0) {
+			if (errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT || errno == EPROTOTYPE) {
+				continue;
+			}
+			return CHAT_ERR_SYS;
+		}
+		if (0 == connect(sockfd, aip->ai_addr, aip->ai_addrlen))
+			break;
+		(void)close(sockfd);
+	}
+	freeaddrinfo(result);
+	free(addr_dup);
+
+	if (aip == NULL) {
+		return CHAT_ERR_NO_ADDR;
+	}
+	if (sockfd < 0)
+		return CHAT_ERR_SYS;
+	if (0 > fcntl(sockfd, F_SETFL, O_NONBLOCK)) {
+		close(sockfd);
+		return CHAT_ERR_SYS;
+	}
+	client->socket = sockfd;
+	return 0;
 }
 
 struct chat_message *
 chat_client_pop_next(struct chat_client *client)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)client;
-	return NULL;
+	const char *msg = pmq_next_message(&client->incoming);
+	if (!msg)
+		return NULL;
+	struct chat_message *ret = NULL;
+	if (!(ret = malloc(sizeof *ret)) || !(ret->data = strdup(msg))) {
+		free(ret);
+		abort();
+	}
+	return ret;
+}
+
+int
+chat_client_feed(struct chat_client *client, const char *msg, uint32_t msg_size)
+{
+	if (client->socket < 0)
+		return CHAT_ERR_NOT_STARTED;
+	pmq_put(&client->outgoing, msg, msg_size);
+	return 0;
+}
+
+int
+chat_client_get_events(const struct chat_client *client)
+{
+	if (client->socket < 0)
+		return 0;
+
+	// Abusing partial_message_queue implementation
+
+	if (client->outgoing.read[0]) {
+		// There is data to send
+		return CHAT_EVENT_INPUT | CHAT_EVENT_OUTPUT;
+	}
+	return CHAT_EVENT_INPUT;
 }
 
 int
 chat_client_update(struct chat_client *client, double timeout)
 {
-	/*
-	 * The easiest way to wait for updates on a single socket with a timeout
-	 * is to use poll(). Epoll is good for many sockets, poll is good for a
-	 * few.
-	 *
-	 * You create one struct pollfd, fill it, call poll() on it, handle the
-	 * events (do read/write).
-	 */
-	(void)client;
-	(void)timeout;
-	return CHAT_ERR_NOT_IMPLEMENTED;
+	if (client->socket < 0)
+		return CHAT_ERR_NOT_STARTED;
+
+	struct pollfd fd = {.fd = client->socket,
+		.events = POLLIN | (chat_client_get_events(client) & CHAT_EVENT_OUTPUT ? POLLOUT : 0)
+	};
+	int res = poll(&fd, 1, timeout * 1000);
+	if (res < 0)
+		return CHAT_ERR_SYS;
+	else if (res == 0)
+		return CHAT_ERR_TIMEOUT;
+	else {
+		// Note: the input processing should preceed output to avoid SIGPIPE
+
+		if (fd.revents & POLLIN) {
+			const size_t bufsz = 1024;
+			char buf[bufsz];
+			ssize_t got;
+			while ((got = recv(client->socket, buf, bufsz, 0)) > 0) {
+				pmq_put(&client->incoming, buf, got);
+			}
+			if (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+					return CHAT_ERR_SYS;
+			}
+		}
+
+		if (fd.revents & POLLOUT) {
+			// Abusing partial_message_queue implementation
+
+			ssize_t sent = 1;
+			while (*client->outgoing.read && sent > 0) {
+				sent = send(client->socket, client->outgoing.read, strlen(client->outgoing.read), 0);
+				if (sent < 0)
+					return CHAT_ERR_SYS;
+				client->outgoing.read += sent;
+			}
+			if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+				return CHAT_ERR_SYS;
+			}
+		}
+	}
+	return 0;
 }
 
 int
 chat_client_get_descriptor(const struct chat_client *client)
 {
 	return client->socket;
-}
-
-int
-chat_client_get_events(const struct chat_client *client)
-{
-	/*
-	 * IMPLEMENT THIS FUNCTION - add OUTPUT event if has non-empty output
-	 * buffer.
-	 */
-	(void)client;
-	return CHAT_EVENT_INPUT;
-}
-
-int
-chat_client_feed(struct chat_client *client, const char *msg, uint32_t msg_size)
-{
-	/* IMPLEMENT THIS FUNCTION */
-	(void)client;
-	(void)msg;
-	(void)msg_size;
-	return CHAT_ERR_NOT_IMPLEMENTED;
 }

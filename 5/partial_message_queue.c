@@ -28,11 +28,11 @@ static void pmq_rebuf(struct partial_message_queue *pmq, size_t min_len) {
 	pmq->read = pmq->base + read_shift;
 }
 
-const char *pmq_next_message(struct partial_message_queue *pmq) {
+char *pmq_next_message(struct partial_message_queue *pmq) {
 	char *lf = strchrnul(pmq->read, '\n');
 	if (*lf) {
 		*lf = '\0';
-		const char *ret = pmq->read;
+		char *ret = pmq->read;
 		pmq->read = lf + 1;
 		return ret;
 	}
@@ -46,10 +46,10 @@ void pmq_put(struct partial_message_queue *pmq, const char *buf, size_t put_len)
 	(void)memmove(pmq->base, pmq->read, readable_len + 1);
 	pmq->read = pmq->base;
 
-	if (readable_len + put_len + 1 < pmq->capacity) {
+	if (readable_len + put_len + 1 > pmq->capacity) {
 		pmq_rebuf(pmq, readable_len + put_len + 1);
 	}
 
 	memcpy(pmq->read + readable_len, buf, put_len);
-	pmq->read[readable_len + put_len + 1] = '\0';
+	pmq->read[readable_len + put_len] = '\0';
 }

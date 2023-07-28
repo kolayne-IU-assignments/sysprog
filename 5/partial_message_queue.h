@@ -19,9 +19,12 @@ void pmq_destroy(struct partial_message_queue *pmq);
  * Returns pointer to a NULL-terminated string that represents exactly one message
  * (without the trailing `'\n'`) or `NULL` if there are no complete messages.
  *
+ * Note that the returned pointer is non-constant but edits to memory beyond the
+ * NULL-terminated string lead to undefined behavior.
+ *
  * Pointers returned by this method are invalidated on the next `pmq_put` operation.
  */
-const char *pmq_next_message(struct partial_message_queue *pmq);
+char *pmq_next_message(struct partial_message_queue *pmq);
 
 /**
  * Copies the given buffer (which may be one lf-terminated message, or several
