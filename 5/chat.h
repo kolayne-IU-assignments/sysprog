@@ -1,5 +1,7 @@
 #pragma once
 
+#define NEED_AUTHOR 1
+
 enum chat_errcode {
 	CHAT_ERR_INVALID_ARGUMENT = 1,
 	CHAT_ERR_TIMEOUT,
@@ -19,7 +21,7 @@ enum chat_events {
 struct chat_message {
 #if NEED_AUTHOR
 	/** Author's name. */
-	const char *author;
+	char *author;
 #endif
 	/** 0-terminate text. */
 	char *data;

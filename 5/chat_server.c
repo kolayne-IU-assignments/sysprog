@@ -10,6 +10,7 @@
 #include <sys/fcntl.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <assert.h>
 
 struct chat_peer {
 	/** Client's socket. To read/write messages. */
@@ -18,6 +19,10 @@ struct chat_peer {
 	struct partial_message_queue outgoing;
 	/// Incoming message queue
 	struct partial_message_queue incoming;
+
+#if NEED_AUTHOR
+	char *author;
+#endif
 
 	struct chat_peer *prev, *next;
 };
@@ -29,6 +34,9 @@ struct chat_peer *chat_peer_new(int socket, struct chat_peer *next) {
 	ret->socket = socket;
 	pmq_init(&ret->outgoing, 16);
 	pmq_init(&ret->incoming, 16);
+#if NEED_AUTHOR
+	ret->author = NULL;
+#endif
 	ret->prev = NULL;
 	ret->next = next;
 	next ? next->prev = ret : 0;
@@ -39,6 +47,9 @@ struct chat_peer *chat_peer_delete(struct chat_peer *peer) {
 	(void)close(peer->socket);
 	pmq_destroy(&peer->outgoing);
 	pmq_destroy(&peer->incoming);
+#if NEED_AUTHOR
+	free(peer->author);
+#endif
 	struct chat_peer *prev = peer->prev, *next = peer->next;
 	if (prev)
 		prev->next = next;
@@ -245,6 +256,15 @@ chat_server_update(struct chat_server *server, double timeout)
 						while ((msg = pmq_next_message(&peer->incoming))) {
 							size_t len = strlen(msg);
 							msg[len++] = '\n';  // '\0' -> '\n'
+
+#if NEED_AUTHOR
+							if (!peer->author) {
+								peer->author = strndup(msg, len);
+								continue;
+							}
+							size_t author_len = strlen(peer->author);
+							pmq_put(&server->received, peer->author, author_len);
+#endif
 							pmq_put(&server->received, msg, len);
 							for (struct chat_peer *other = server->peers; other; other = other->next) {
 								if (other == peer)
@@ -298,14 +318,27 @@ chat_server_update(struct chat_server *server, double timeout)
 struct chat_message *
 chat_server_pop_next(struct chat_server *server)
 {
-	char *msg = pmq_next_message(&server->received);
-	if (!msg)
-		return NULL;
-	struct chat_message *ret = NULL;
-	if (!(ret = malloc(sizeof *ret)) || !(ret->data = strdup(msg))) {
-		free(ret);
+	struct chat_message *ret = malloc(sizeof *ret);
+	if (!ret)
 		abort();
-	}
+
+#if NEED_AUTHOR
+	char *author = pmq_next_message(&server->received), *data = pmq_next_message(&server->received);
+	if (!author)
+		return NULL;
+	assert(data);
+
+	ret->author = strdup(author);
+	if (!ret->author)
+		abort();
+#else
+	char *data = pmq_next_message(&server->received);
+	if (!data)
+		return NULL;
+#endif
+	ret->data = strdup(data);
+	if (!ret->data)
+		abort();
 	return ret;
 }
 

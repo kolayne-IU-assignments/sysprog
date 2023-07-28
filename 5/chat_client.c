@@ -20,19 +20,29 @@ struct chat_client {
 	struct partial_message_queue incoming;
 	/** Outgoing messages queue */
 	struct partial_message_queue outgoing;
+
+#if NEED_AUTHOR
+	char *name;
+#endif
 };
 
 struct chat_client *
 chat_client_new(const char *name)
 {
-	/* Ignore 'name' param if don't want to support it for +5 points. */
-	(void)name;
-
 	struct chat_client *client = calloc(1, sizeof(*client));
 	client->socket = -1;
 
 	pmq_init(&client->incoming, 16);
 	pmq_init(&client->outgoing, 16);
+
+#if NEED_AUTHOR
+	assert(!strchr(name, '\n'));  // Client name with `'\n'`s are not allowed
+	client->name = strdup(name);
+	if (!client->name)
+		abort();
+#else
+	(void)name;
+#endif
 
 	return client;
 }
@@ -45,6 +55,9 @@ chat_client_delete(struct chat_client *client)
 
 	pmq_destroy(&client->incoming);
 	pmq_destroy(&client->outgoing);
+#if NEED_AUTHOR
+	free(client->name);
+#endif
 
 	free(client);
 }
@@ -100,20 +113,38 @@ chat_client_connect(struct chat_client *client, const char *addr)
 		return CHAT_ERR_SYS;
 	}
 	client->socket = sockfd;
+
+#if NEED_AUTHOR
+	chat_client_feed(client, client->name, strlen(client->name));
+	chat_client_feed(client, "\n", 1);
+#endif
+
 	return 0;
 }
 
 struct chat_message *
 chat_client_pop_next(struct chat_client *client)
 {
-	const char *msg = pmq_next_message(&client->incoming);
-	if (!msg)
-		return NULL;
-	struct chat_message *ret = NULL;
-	if (!(ret = malloc(sizeof *ret)) || !(ret->data = strdup(msg))) {
-		free(ret);
+	struct chat_message *ret = malloc(sizeof *ret);
+	if (!ret)
 		abort();
-	}
+
+#if NEED_AUTHOR
+	const char *author = pmq_next_message(&client->incoming), *data = pmq_next_message(&client->incoming);
+	if (!author)
+		return NULL;
+	assert(data);
+	ret->author = strdup(author);
+	if (!ret->author)
+		abort();
+#else
+	const char *data = pmq_next_message(&client->incoming);
+	if (!data)
+		return NULL;
+#endif
+	ret->data = strdup(data);
+	if (!ret->data)
+		abort();
 	return ret;
 }
 
