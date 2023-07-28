@@ -87,6 +87,9 @@ chat_server_delete(struct chat_server *server)
 		close(server->epoll_fd);
 	pmq_destroy(&server->received);
 
+	while (server->peers)
+		server->peers = chat_peer_delete(server->peers);
+
 	free(server);
 }
 
