@@ -232,28 +232,30 @@ chat_server_update(struct chat_server *server, double timeout)
 							server->peers = chat_peer_delete(peer);
 						else
 							chat_peer_delete(peer);
+
+						continue;
 					} else if (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
 						return CHAT_ERR_SYS;
-					}
-
-					// Now send messages to all other clients and save it as server
-					char *msg;
-					while ((msg = pmq_next_message(&peer->incoming))) {
-						size_t len = strlen(msg);
-						msg[len++] = '\n';  // '\0' -> '\n'
-						pmq_put(&server->received, msg, len);
-						for (struct chat_peer *other = server->peers; other; other = other->next) {
-							if (other == peer)
-								continue;
-							pmq_put(&other->outgoing, msg, len);
-							++server->pending_output_peers;
-							int err = epoll_ctl(server->epoll_fd, EPOLL_CTL_MOD,
-								other->socket, &(struct epoll_event){
-									.events = EPOLLIN | EPOLLOUT,
-									.data.ptr = other
-								});
-							if (err)
-							    return CHAT_ERR_SYS;
+					} else {
+						// Successful `recv`. Process the received data
+						char *msg;
+						while ((msg = pmq_next_message(&peer->incoming))) {
+							size_t len = strlen(msg);
+							msg[len++] = '\n';  // '\0' -> '\n'
+							pmq_put(&server->received, msg, len);
+							for (struct chat_peer *other = server->peers; other; other = other->next) {
+								if (other == peer)
+									continue;
+								pmq_put(&other->outgoing, msg, len);
+								++server->pending_output_peers;
+								int err = epoll_ctl(server->epoll_fd, EPOLL_CTL_MOD,
+									other->socket, &(struct epoll_event){
+										.events = EPOLLIN | EPOLLOUT,
+										.data.ptr = other
+									});
+								if (err)
+								    return CHAT_ERR_SYS;
+							}
 						}
 					}
 				}
