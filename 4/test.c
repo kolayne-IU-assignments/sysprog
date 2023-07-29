@@ -318,17 +318,10 @@ test_detach_stress(void)
 	unit_check(thread_task_detach(task) == TPOOL_ERR_TASK_NOT_PUSHED,
 		   "detach non-pushed task");
 	unit_fail_if(thread_task_delete(task) != 0);
-
-	/*
-	 * Delete pool. If fails, give a little more time to make sure workers
-	 * clean up after completing the detached task.
-	 */
-	int err = thread_pool_delete(p);
-	if (err == TPOOL_ERR_HAS_TASKS) {
-		usleep(1000);
-		err = thread_pool_delete(p);
-	}
-	unit_fail_if(err != 0);
+	// Might be unable to delete the pool right away - the task needs time
+	// to complete.
+	while (thread_pool_delete(p) != 0)
+		usleep(100);
 
 	unit_test_finish();
 #endif
