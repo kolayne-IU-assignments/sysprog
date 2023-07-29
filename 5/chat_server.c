@@ -298,11 +298,16 @@ chat_server_update(struct chat_server *server, double timeout)
 								peer->author = strndup(msg, len);
 								continue;
 							}
+
+                            char *author = peer->author;
 							size_t author_len = strlen(peer->author);
 							pmq_put(&server->received, peer->author, author_len);
+#else
+                            char *author = NULL;
+                            size_t author_len = 0;
 #endif
 							pmq_put(&server->received, msg, len);
-							int err = broadcast_message(server, peer->author, author_len, msg, len, peer);
+							int err = broadcast_message(server, author, author_len, msg, len, peer);
 							if (err)
 								return err;
 						}
@@ -338,23 +343,27 @@ chat_server_update(struct chat_server *server, double timeout)
 struct chat_message *
 chat_server_pop_next(struct chat_server *server)
 {
+#if NEED_AUTHOR
+	char *author = pmq_next_message(&server->received), *data = pmq_next_message(&server->received);
+	if (!author) {
+		return NULL;
+	}
+	assert(data);
+#else
+	char *data = pmq_next_message(&server->received);
+	if (!data) {
+		return NULL;
+	}
+#endif
+
 	struct chat_message *ret = malloc(sizeof *ret);
 	if (!ret)
 		abort();
 
 #if NEED_AUTHOR
-	char *author = pmq_next_message(&server->received), *data = pmq_next_message(&server->received);
-	if (!author)
-		return NULL;
-	assert(data);
-
 	ret->author = strdup(author);
 	if (!ret->author)
 		abort();
-#else
-	char *data = pmq_next_message(&server->received);
-	if (!data)
-		return NULL;
 #endif
 	ret->data = strdup(data);
 	if (!ret->data)

@@ -125,22 +125,27 @@ chat_client_connect(struct chat_client *client, const char *addr)
 struct chat_message *
 chat_client_pop_next(struct chat_client *client)
 {
+#if NEED_AUTHOR
+	const char *author = pmq_next_message(&client->incoming), *data = pmq_next_message(&client->incoming);
+	if (!author) {
+		return NULL;
+	}
+	assert(data);
+#else
+	const char *data = pmq_next_message(&client->incoming);
+	if (!data) {
+		return NULL;
+	}
+#endif
+
 	struct chat_message *ret = malloc(sizeof *ret);
 	if (!ret)
 		abort();
 
 #if NEED_AUTHOR
-	const char *author = pmq_next_message(&client->incoming), *data = pmq_next_message(&client->incoming);
-	if (!author)
-		return NULL;
-	assert(data);
 	ret->author = strdup(author);
 	if (!ret->author)
 		abort();
-#else
-	const char *data = pmq_next_message(&client->incoming);
-	if (!data)
-		return NULL;
 #endif
 	ret->data = strdup(data);
 	if (!ret->data)
